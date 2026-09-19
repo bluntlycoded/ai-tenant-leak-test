@@ -22,6 +22,7 @@ from aitlt.connector import (
     HttpStatusError,
     MalformedResponseError,
     UnresolvedPathError,
+    UnsupportedResponseError,
 )
 
 WELL_FORMED = {
@@ -208,6 +209,65 @@ def test_transient_server_error_recovers_within_the_retry_budget():
     assert obs.attempts == 3
 
 
+# ----------------------------------------------------- unsupported shapes
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    ["text/event-stream", "text/event-stream; charset=utf-8", "application/x-ndjson", "application/jsonl"],
+)
+def test_streaming_responses_are_refused_not_guessed_at(content_type):
+    """A streamed body must not fall through to the plain-text branch.
+
+    It would be scanned as one blob: canaries might be found, citations and
+    metadata never would, and the run would read as a partial success.
+    """
+    body = 'data: {"answer": "partial"}\n\ndata: [DONE]\n\n'
+    handler = lambda request: httpx.Response(200, text=body, headers={"content-type": content_type})
+    with connector_returning(handler) as c:
+        with pytest.raises(UnsupportedResponseError) as exc:
+            c.ask("tenant_a", "hello")
+    assert "does not support" in str(exc.value)
+    assert "stream" in str(exc.value).lower()
+
+
+def test_ordinary_json_content_type_is_unaffected():
+    handler = lambda request: httpx.Response(
+        200, json=WELL_FORMED, headers={"content-type": "application/json; charset=utf-8"}
+    )
+    with connector_returning(handler) as c:
+        assert c.ask("tenant_a", "hello").answer
+
+
+# ------------------------------------------------------------- expiring auth
+
+
+def test_first_request_401_reads_as_a_wrong_credential():
+    handler = lambda request: httpx.Response(401, json={"detail": "nope"})
+    with connector_returning(handler) as c:
+        with pytest.raises(AuthError) as exc:
+            c.ask("tenant_a", "hello")
+    assert "first attempt" in str(exc.value)
+
+
+def test_later_401_reads_as_an_expiring_credential():
+    """V1 has no refresh flow; the message must point at that, not at a typo."""
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(200, json=WELL_FORMED)
+        return httpx.Response(401, json={"detail": "expired"})
+
+    with connector_returning(handler) as c:
+        c.ask("tenant_a", "first")
+        with pytest.raises(AuthError) as exc:
+            c.ask("tenant_a", "second")
+    assert "expired mid-run" in str(exc.value)
+    assert "static tokens only" in str(exc.value)
+
+
 # -------------------------------------------------------------- transport
 
 
@@ -236,7 +296,8 @@ def test_timeout_is_bounded_and_named():
 
 def test_every_failure_mode_is_a_connector_error():
     """The runner catches ConnectorError; nothing may escape as a bare crash."""
-    for cls in (AuthError, ConnectorTimeout, HttpStatusError, MalformedResponseError, UnresolvedPathError):
+    for cls in (AuthError, ConnectorTimeout, HttpStatusError, MalformedResponseError,
+                UnresolvedPathError, UnsupportedResponseError):
         assert issubclass(cls, ConnectorError)
 
 

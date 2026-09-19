@@ -57,11 +57,6 @@ jobs:
       - name: Unit tests
         run: python -m pytest -q -m "not e2e"
 
-      - name: End-to-end lifecycle tests
-        # Live devtarget over a real socket: seed, verify, test, then the two
-        # ways a run stops being trustworthy afterwards.
-        run: python -m pytest -q -m e2e
-
       - name: Generate fixtures
         run: aitenant init
 
@@ -73,3 +68,25 @@ jobs:
           PY: python
           AITENANT: aitenant
         run: ./scripts/calibrate.sh
+
+  e2e:
+    # Its own job so it is separately visible and separately requireable as a
+    # branch-protection check. These are the most product-realistic tests in the
+    # repo; if they can be skipped they will drift.
+    name: End-to-end lifecycle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install with dev target
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[devtarget]" pytest
+
+      - name: Lifecycle against a live target
+        # Seed, verify, test, then every way a run stops being trustworthy:
+        # bad connector config, regenerated fixtures, changed endpoint, dead host.
+        run: python -m pytest -q -m e2e

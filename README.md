@@ -172,7 +172,23 @@ Field names and nesting are yours — the config maps to them with dotted paths 
 | The synthetic corpus ingested and indexed in each tenant | `verify-ingest` fails the run otherwise |
 | Stable responses for the same input | Deterministic markers, not deterministic phrasing — the model may paraphrase freely |
 
-**Unsupported in V1** — say so early rather than discovering it mid-pilot: SSO or interactive login, streaming-only responses (SSE/websocket) with no JSON mode, endpoints requiring a signed request body, production environments, and any target where two isolated test tenants cannot be created.
+### Unsupported in V1
+
+Qualify against this list before an engagement, not during one. Where the limit is detectable, the connector refuses with a named error rather than guessing.
+
+| Not supported | Behaviour | Why |
+|---|---|---|
+| **Streaming responses** — SSE, NDJSON, JSONL | `UnsupportedResponseError`, detected from the response content type | A streamed body would fall to the plain-text branch and be scanned as one blob: canaries might be found, citations and metadata never would, and the run would read as a partial success |
+| **Refresh-token / session-renewal auth** | `AuthError` naming an expired credential, distinguished from a wrong one | V1 sends a static credential per tenant and never renews it |
+| **SSO or interactive login** | not modelled | Same reason — the config carries a static header or body value |
+| **Signed request bodies** | not modelled | The prompt is injected into the body after signing would have happened |
+| **Websocket transports** | not modelled | One JSON `POST` only |
+| **Production environments** | refused by policy, not by code | The suite plants synthetic documents; it must never touch real customer data |
+| **Targets without two isolable test tenants** | no meaningful test exists | The boundary under test does not exist |
+
+Tenant identity is supported as **per-tenant headers or per-tenant body fields**. That covers bearer tokens, API-key headers, and `workspace_id`/`user_id` in the payload. Anything more exotic — a tenant derived from the hostname, a subdomain, a signed claim the caller cannot set — needs a connector change, and that change should be driven by a real design partner rather than anticipated.
+
+Streaming is the most likely of these to block a first engagement, since most modern chat endpoints stream by default. Many expose `"stream": false`; if the target does, set it under `endpoint.body` and the rest of the contract applies unchanged.
 
 [`examples/aitenant.yaml`](examples/aitenant.yaml) documents every config field. Tokens are never written to the config — it holds `${VAR}` references resolved from the environment at run time.
 
@@ -264,11 +280,18 @@ One unscoped code path usually fails most of the suite at once. The report's **L
 ## Development
 
 ```bash
-.venv/bin/python -m pytest tests/ -q   # detector unit tests
-./scripts/calibrate.sh                 # end-to-end calibration
-./scripts/smoke.sh                     # wheel installs and runs outside the source tree
+./scripts/verify.sh
 ```
 
-All three run in CI on every push ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
+That is the release gate — everything that must be green before a change ships or a report is generated for a customer:
+
+| Stage | What it proves |
+|---|---|
+| `pytest -m "not e2e"` | detector, summary semantics, connector error modes, CLI exit contract |
+| `pytest -m e2e` | the whole operator journey against a live target over a real socket |
+| `scripts/calibrate.sh` | the suite fires on each leak path and stays quiet on a clean one |
+| `scripts/smoke.sh` | the wheel installs and the CLI runs outside the source tree |
+
+The end-to-end stage is part of the gate, not an optional extra. It is the most product-realistic thing in the repo, so if it can be skipped it will drift — and the first place that would show up is a customer engagement. It runs as its own CI job for the same reason, so it can be required independently.
 
 Reports land in `output/` and are gitignored — they contain customer responses.
