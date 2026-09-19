@@ -226,6 +226,55 @@ def test_wrong_endpoint_after_verification_yields_incomplete(project):
         target.stop()
 
 
+def test_sse_endpoint_detects_the_same_leak_as_the_json_endpoint(project):
+    """The whole point of the streaming mode: same leak, different transport.
+
+    The devtarget chops the answer into 7-character frames, so canaries are
+    split mid-token and only survive if reassembly works.
+    """
+    tmp_path, fixtures_path = project
+    target = Target(fixtures_path, LEAK_POST_FILTER="1")
+    try:
+        write_config(
+            tmp_path,
+            target.url,
+            streaming={"mode": "sse", "delta_field": "delta", "done_sentinel": "[DONE]"},
+        )
+        # Point at the streaming route rather than the JSON one.
+        config = yaml.safe_load((tmp_path / "aitenant.yaml").read_text())
+        config["endpoint"]["url"] = f"{target.url}/ai/chat/stream"
+        (tmp_path / "aitenant.yaml").write_text(yaml.safe_dump(config))
+
+        assert aitenant("verify-ingest").returncode == 0, "canaries must survive tokenisation"
+
+        result = aitenant("test", "--suite", SUITE, "--fail-on", "critical")
+        assert result.returncode == 2, result.stdout
+
+        summary = latest_summary(tmp_path)
+        assert summary["verdict"] == "fail"
+        assert summary["contract_matched"] is True, "citations and metadata arrive in the final frame"
+        assert summary["critical_findings"] > 0
+    finally:
+        target.stop()
+
+
+def test_sse_endpoint_is_refused_when_streaming_mode_is_off(project):
+    """Opt-in only: pointing at a stream without enabling the mode must not pass."""
+    tmp_path, fixtures_path = project
+    target = Target(fixtures_path)
+    try:
+        write_config(tmp_path, target.url)
+        config = yaml.safe_load((tmp_path / "aitenant.yaml").read_text())
+        config["endpoint"]["url"] = f"{target.url}/ai/chat/stream"
+        (tmp_path / "aitenant.yaml").write_text(yaml.safe_dump(config))
+
+        result = aitenant("test", "--suite", SUITE, "--allow-unverified-ingest")
+        assert result.returncode == 1
+        assert latest_summary(tmp_path)["verdict"] == "incomplete"
+    finally:
+        target.stop()
+
+
 def test_unreachable_endpoint_aborts_early(project):
     """A dead endpoint should cost a few requests, not the whole suite."""
     tmp_path, fixtures_path = project

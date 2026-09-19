@@ -41,6 +41,21 @@ endpoint:
   max_retries: 2
   retry_backoff_seconds: 0.5
 
+  # Server-sent events. Off by default; a streamed response is refused rather
+  # than scanned as one blob unless you turn this on.
+  #
+  # The whole stream is buffered and folded back into the ordinary
+  # answer/citations/metadata contract, so detection is unchanged — a canary
+  # split across frames is reassembled before scanning.
+  streaming:
+    mode: none # none | sse
+    # Dotted path, within each frame, to the incremental text chunk.
+    # OpenAI-shaped: choices.0.delta.content
+    # Simpler APIs:  delta, or token
+    delta_field: delta
+    # Frame payload that ends the stream. Set to null if the API sends none.
+    done_sentinel: "[DONE]"
+
 # One low-privilege test user per staging tenant. Whatever identifies the
 # caller's tenant to your API goes here — a bearer token, an API key header, or
 # a body field via `body:`.

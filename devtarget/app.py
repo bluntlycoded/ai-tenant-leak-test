@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 FIXTURES = Path(os.environ.get("AITLT_FIXTURES", "fixtures/fixtures.json"))
@@ -145,6 +146,29 @@ def health() -> dict[str, Any]:
             if flag(name)
         ],
     }
+
+
+@app.post("/ai/chat/stream")
+def chat_stream(req: ChatRequest, authorization: str = Header(default="")):
+    """The same answer, streamed. Same leak flags, same bugs.
+
+    Exists so the SSE path is proven against a real socket rather than only
+    against a mock: a leak must be just as detectable when the answer arrives
+    as tokens, and tokenisation must not be able to split a canary so that the
+    detector misses it.
+    """
+    payload = chat(req, authorization)
+
+    def frames():
+        # Chop the answer mid-token on purpose — a canary split across frames
+        # must still be caught once the stream is reassembled.
+        text = payload["answer"]
+        for i in range(0, len(text), 7):
+            yield f"data: {json.dumps({'delta': text[i : i + 7]})}\n\n"
+        yield f"data: {json.dumps({'citations': payload['citations'], 'metadata': payload['metadata']})}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(frames(), media_type="text/event-stream")
 
 
 @app.post("/ai/chat")

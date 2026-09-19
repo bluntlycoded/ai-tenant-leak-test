@@ -178,7 +178,7 @@ Qualify against this list before an engagement, not during one. Where the limit 
 
 | Not supported | Behaviour | Why |
 |---|---|---|
-| **Streaming responses** — SSE, NDJSON, JSONL | `UnsupportedResponseError`, detected from the response content type | A streamed body would fall to the plain-text branch and be scanned as one blob: canaries might be found, citations and metadata never would, and the run would read as a partial success |
+| **NDJSON / JSONL streaming** | `UnsupportedResponseError`, detected from the response content type | Out of scope; SSE is the one streaming transport handled |
 | **Refresh-token / session-renewal auth** | `AuthError` naming an expired credential, distinguished from a wrong one | V1 sends a static credential per tenant and never renews it |
 | **SSO or interactive login** | not modelled | Same reason — the config carries a static header or body value |
 | **Signed request bodies** | not modelled | The prompt is injected into the body after signing would have happened |
@@ -188,7 +188,34 @@ Qualify against this list before an engagement, not during one. Where the limit 
 
 Tenant identity is supported as **per-tenant headers or per-tenant body fields**. That covers bearer tokens, API-key headers, and `workspace_id`/`user_id` in the payload. Anything more exotic — a tenant derived from the hostname, a subdomain, a signed claim the caller cannot set — needs a connector change, and that change should be driven by a real design partner rather than anticipated.
 
-Streaming is the most likely of these to block a first engagement, since most modern chat endpoints stream by default. Many expose `"stream": false`; if the target does, set it under `endpoint.body` and the rest of the contract applies unchanged.
+### Streaming (SSE)
+
+Opt-in, off by default. Most modern chat endpoints stream, so this is the one transport beyond plain JSON that V1 handles:
+
+```yaml
+endpoint:
+  url: https://staging.example.com/api/ai/chat/stream
+  streaming:
+    mode: sse                 # none (default) | sse
+    delta_field: delta        # dotted path, within each frame, to the text chunk
+    done_sentinel: "[DONE]"   # frame payload that ends the stream; null if none
+```
+
+`delta_field` is the only vendor-specific knob. OpenAI-shaped APIs use `choices.0.delta.content`; simpler ones use `delta` or `token`. Citations and metadata reuse the same dotted paths as the non-streaming contract, resolved against whichever frame carries them — typically a final frame before the sentinel.
+
+How it behaves:
+
+| | |
+|---|---|
+| Aggregation | the whole stream is buffered, then folded back into one answer plus citations and metadata. Everything downstream is unchanged, because a canary in a streamed answer is the same canary |
+| Deltas vs. a final whole message | deltas win. A truncated stream should read as truncated, not be silently repaired by a final frame that may never arrive |
+| Wrong `delta_field` | `UnresolvedPathError` naming the keys actually present in the first frame |
+| Mode off, endpoint streams | still refused — opt-in only, and the error tells you which setting to turn on |
+| Unparseable frames | counted, not hidden, so a mostly-broken stream cannot read as a short answer |
+
+The case worth knowing about: tokenisation splits canaries mid-string, so a marker can arrive across three frames. Reassembly restores it, and both a unit test and an end-to-end test against a real socket pin that — the dev target deliberately chops answers into 7-character frames for exactly this reason.
+
+What this mode is not: no incremental consumption, no reconnection, no `Last-Event-ID`, no websockets. Right for a test harness against staging, wrong for a production client.
 
 [`examples/aitenant.yaml`](examples/aitenant.yaml) documents every config field. Tokens are never written to the config — it holds `${VAR}` references resolved from the environment at run time.
 

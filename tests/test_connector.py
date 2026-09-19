@@ -227,8 +227,13 @@ def test_streaming_responses_are_refused_not_guessed_at(content_type):
     with connector_returning(handler) as c:
         with pytest.raises(UnsupportedResponseError) as exc:
             c.ask("tenant_a", "hello")
-    assert "does not support" in str(exc.value)
-    assert "stream" in str(exc.value).lower()
+    assert "not handled by the current configuration" in str(exc.value)
+    # SSE is opt-in, so the message must point at the setting that enables it.
+    # NDJSON and JSONL have no supported mode, so they point elsewhere.
+    if "event-stream" in content_type:
+        assert "streaming.mode: sse" in str(exc.value)
+    else:
+        assert "non-streaming JSON mode" in str(exc.value)
 
 
 def test_ordinary_json_content_type_is_unaffected():

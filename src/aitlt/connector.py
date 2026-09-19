@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 
+from . import sse
 from .config import Config, dig, bury
 from .models import Observation
 
@@ -123,12 +124,22 @@ class Connector:
         self._authenticated_ok = True
 
         content_type = response.headers.get("content-type", "").lower()
+        is_sse = "text/event-stream" in content_type
+
+        if is_sse and ep.streaming.mode == "sse":
+            return self._observe_sse(ep, response, attempts)
+
         if any(marker in content_type for marker in UNSUPPORTED_CONTENT_TYPES):
+            hint = (
+                "Set `endpoint.streaming.mode: sse` and point `delta_field` at the text chunk "
+                "inside each frame."
+                if is_sse
+                else "Point the config at a non-streaming JSON mode if the API has one "
+                '(often `"stream": false` in the request body).'
+            )
             raise UnsupportedResponseError(
-                f"endpoint returned `{content_type.split(';')[0]}`, which V1 does not support. "
-                f"Streaming and line-delimited responses cannot be mapped to the configured "
-                f"answer/citations/metadata paths. Point the config at a non-streaming JSON "
-                f"mode if the API has one (often `\"stream\": false` in the request body)."
+                f"endpoint returned `{content_type.split(';')[0]}`, which is not handled by the "
+                f"current configuration. {hint}"
             )
 
         try:
@@ -178,6 +189,49 @@ class Connector:
                 # Only meaningful when the path is configured at all.
                 "citations": citations is not None if ep.citations_field else False,
                 "metadata": metadata is not None if ep.metadata_field else False,
+            },
+            attempts=attempts,
+        )
+
+    def _observe_sse(self, ep, response: httpx.Response, attempts: int) -> Observation:
+        """Fold a streamed response back into the ordinary contract.
+
+        Everything downstream is unchanged: a canary in a streamed answer is the
+        same canary, so detection, severity and reporting do not need to know
+        the transport differed.
+        """
+        agg = sse.aggregate(
+            response.text,
+            delta_field=ep.streaming.delta_field,
+            done_sentinel=ep.streaming.done_sentinel or "\0",
+            text_field=ep.response_text_field,
+            citations_field=ep.citations_field,
+            metadata_field=ep.metadata_field,
+        )
+
+        if agg.frames == 0:
+            raise MalformedResponseError(
+                "streamed response contained no `data:` frames; nothing to scan"
+            )
+        if not agg.answer_found:
+            raise UnresolvedPathError(
+                f"no frame in the stream resolved `{ep.streaming.delta_field}` "
+                f"(or `{ep.response_text_field}`). {agg.frames} frame(s) received, "
+                f"{agg.unparseable_frames} unparseable. Keys seen in the first frame: "
+                f"{sorted(agg.raw_frames[0])[:10] if agg.raw_frames else 'none'}. "
+                f"Fix `endpoint.streaming.delta_field`."
+            )
+
+        return Observation(
+            answer=agg.answer,
+            citations=_as_list(agg.citations),
+            metadata=agg.metadata if isinstance(agg.metadata, dict) else ({} if agg.metadata is None else {"value": agg.metadata}),
+            http_status=response.status_code,
+            raw={"sse_frames": agg.raw_frames},
+            schema_found={
+                "answer": True,
+                "citations": agg.citations is not None if ep.citations_field else False,
+                "metadata": agg.metadata is not None if ep.metadata_field else False,
             },
             attempts=attempts,
         )

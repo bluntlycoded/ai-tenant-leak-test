@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -50,6 +50,23 @@ class TenantAuth(BaseModel):
     body: dict[str, Any] = Field(default_factory=dict)
 
 
+class StreamingConfig(BaseModel):
+    """Opt-in SSE support. Off unless the target actually streams.
+
+    Deliberately minimal: the tool buffers the whole stream and folds it back
+    into the ordinary answer/citations/metadata contract. Everything downstream
+    — detection, severity, reporting — is unchanged, because a leak in a
+    streamed answer is the same leak.
+    """
+
+    mode: Literal["none", "sse"] = "none"
+    #: Dotted path *within each frame* to the incremental text chunk.
+    #: OpenAI-style: "choices.0.delta.content". Simple APIs: "delta" or "token".
+    delta_field: str = "delta"
+    #: Frame payload that ends the stream. Set to null if the API sends none.
+    done_sentinel: str | None = "[DONE]"
+
+
 class EndpointConfig(BaseModel):
     """The one supported target shape for V1.
 
@@ -82,6 +99,9 @@ class EndpointConfig(BaseModel):
     #: re-sent, so cache tests stay honest.
     max_retries: int = 2
     retry_backoff_seconds: float = 0.5
+    #: SSE support, off by default. When off, a streamed response is refused
+    #: rather than scanned as one undifferentiated blob.
+    streaming: StreamingConfig = Field(default_factory=StreamingConfig)
 
 
 class ReportConfig(BaseModel):
