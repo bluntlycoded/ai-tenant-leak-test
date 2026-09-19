@@ -214,6 +214,14 @@ def test(
     build: str = typer.Option(None, "--build"),
     fail_on: Severity = typer.Option(Severity.MEDIUM, "--fail-on", help="Minimum severity that fails the build."),
     formats: str = typer.Option(None, "--format", help="Comma-separated: markdown,json"),
+    allow_unverified_ingest: bool = typer.Option(
+        False,
+        "--allow-unverified-ingest",
+        help=(
+            "Run without a passing verify-ingest. For manual debugging only — the result "
+            "is marked incomplete and is not usable as evidence."
+        ),
+    ),
 ) -> None:
     """Run the leak suite against the configured endpoint."""
     config = _load_config(config_path)
@@ -246,7 +254,14 @@ def test(
         sev = f" ({result.severity.value})" if result.severity else ""
         console.print(f"  {mark} {result.test_case.id:<6} {result.test_case.name}{sev}")
 
-    run = run_suite(config, fs, cases, suite_name, on_result=progress)
+    run = run_suite(
+        config,
+        fs,
+        cases,
+        suite_name,
+        on_result=progress,
+        require_ingest_verification=not allow_unverified_ingest,
+    )
 
     fmts = [f.strip() for f in formats.split(",")] if formats else config.report.formats
     written = report_mod.write(run, config.report.directory, fmts)
@@ -254,7 +269,8 @@ def test(
     for path in written:
         console.print(f"[green]Report:[/green] {path}")
 
-    _summarise_and_exit(run, fail_on)
+    _, _, ingest_reason = stamp.read(config.fixtures_path, config.endpoint.url)
+    _summarise_and_exit(run, fail_on, ingest_reason)
 
 
 @app.command()
@@ -276,7 +292,7 @@ def report(
         typer.echo(markdown)
 
 
-def _summarise_and_exit(run: TestRun, fail_on: Severity) -> None:
+def _summarise_and_exit(run: TestRun, fail_on: Severity, ingest_reason: str = "") -> None:
     failures = run.failures
     errors = run.errors
     summary = run.summary
@@ -284,50 +300,74 @@ def _summarise_and_exit(run: TestRun, fail_on: Severity) -> None:
     if errors:
         console.print(f"[yellow]{len(errors)} test(s) could not run — those boundaries were not tested.[/yellow]")
 
-    # An under-scoped run that reports no leaks is the failure mode this tool
-    # exists to prevent, so it is never allowed to look like a pass.
+    # Report every completeness problem, whatever the verdict turns out to be.
     if summary and not summary.contract_matched:
         console.print()
-        console.print(
-            "[red]INCOMPLETE — the response did not match the configured connector contract.[/red]"
-        )
+        console.print("[red]Connector contract not matched.[/red]")
         for item in summary.scope_not_tested:
-            if "never resolved" in item or "not configured" in item:
+            if "never resolved" in item:
                 console.print(f"  [yellow]•[/yellow] {item}")
         console.print(
             "Those surfaces were scanned as an empty string, so their tests passed without "
-            "testing anything. Fix the dotted paths in your config (or set them to null to "
-            "record them as out of scope) and re-run. This run is not usable as evidence."
+            "testing anything. Fix the dotted paths in your config, or set them to null to "
+            "record them as out of scope."
         )
-        raise typer.Exit(EXIT_OPERATIONAL)
 
     if summary and not summary.ingest_verified:
+        console.print()
+        console.print("[red]Ingest verification has not passed for these fixtures.[/red]")
+        if ingest_reason:
+            console.print(f"  [yellow]•[/yellow] {ingest_reason}")
         console.print(
-            "[yellow]Warning: verify-ingest has not passed for these fixtures against this "
-            "endpoint.[/yellow] The canaries may not exist in the index, in which case these "
-            "results are meaningless. Run `aitenant verify-ingest` first."
+            "Canary presence in the index was never confirmed, so a clean result proves "
+            "nothing. Run [bold]aitenant verify-ingest[/bold] first."
         )
+        if summary.ingest_verification_waived:
+            console.print("[yellow]Waived by --allow-unverified-ingest. Recorded in the report.[/yellow]")
+        else:
+            console.print(
+                "[dim]For manual debugging only, --allow-unverified-ingest runs anyway.[/dim]"
+            )
 
-    if not failures:
-        if errors:
-            console.print("[yellow]No leaks detected, but the run was incomplete.[/yellow]")
-            raise typer.Exit(EXIT_OPERATIONAL)
+    console.print()
+
+    # Precedence: a leak outranks everything. Every completeness problem above
+    # causes false negatives, never false positives — so a finding is real
+    # evidence even when the run around it was unsound.
+    if failures:
+        gating = [r for r in failures if r.severity and r.severity.rank >= fail_on.rank]
+        worst = run.worst_severity
         console.print(
-            f"[green]PASS[/green] — {len(run.results)} tests, no cross-tenant leakage observed "
-            "on the surfaces listed under Scope exercised."
+            f"[red]FAIL[/red] — {len(failures)} of {len(run.results)} tests leaked data "
+            f"(highest severity: {worst.value if worst else 'unknown'})."
         )
-        raise typer.Exit(EXIT_OK)
+        if summary and not summary.run_complete:
+            console.print(
+                "[yellow]The run was also incomplete — these findings are real, but other "
+                "boundaries went untested.[/yellow]"
+            )
+        if not gating:
+            console.print(f"[yellow]No finding reached the --fail-on {fail_on.value} threshold; exiting 0.[/yellow]")
+            raise typer.Exit(EXIT_OK)
+        raise typer.Exit(EXIT_LEAK)
 
-    gating = [r for r in failures if r.severity and r.severity.rank >= fail_on.rank]
-    worst = run.worst_severity
+    if summary and not summary.run_complete:
+        console.print(
+            "[red]INCOMPLETE[/red] — no leaks were observed, but the run did not prove the "
+            "boundary held. This result is not usable as evidence."
+        )
+        # An explicit waiver is the operator accepting that, so do not also fail
+        # their shell. The verdict in the report stays incomplete regardless.
+        only_ingest_missing = summary.contract_matched and not errors
+        if summary.ingest_verification_waived and only_ingest_missing:
+            raise typer.Exit(EXIT_OK)
+        raise typer.Exit(EXIT_OPERATIONAL)
+
     console.print(
-        f"[red]FAIL[/red] — {len(failures)} of {len(run.results)} tests leaked data "
-        f"(highest severity: {worst.value if worst else 'unknown'})."
+        f"[green]PASS[/green] — {len(run.results)} tests, no cross-tenant leakage observed "
+        "on the surfaces listed under Scope exercised."
     )
-    if not gating:
-        console.print(f"[yellow]No finding reached the --fail-on {fail_on.value} threshold; exiting 0.[/yellow]")
-        raise typer.Exit(EXIT_OK)
-    raise typer.Exit(EXIT_LEAK)
+    raise typer.Exit(EXIT_OK)
 
 
 if __name__ == "__main__":

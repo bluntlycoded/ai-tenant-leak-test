@@ -100,6 +100,14 @@ def to_markdown(run: TestRun) -> str:
             f"{len(failures)} of {len(run.results)} tests leaked data across the tenant boundary. "
             f"Highest severity: **{worst.value if worst else 'unknown'}**."
         )
+        if summary:
+            lines.append("")
+            lines.append(
+                f"{summary.distinct_markers_leaked} distinct marker(s) leaked across "
+                f"{summary.distinct_surfaces_leaked} surface(s), observed "
+                f"{summary.total_matches} time(s). Counts below are of distinct markers — "
+                "one unscoped code path typically trips many tests at once."
+            )
     elif not errors:
         lines.append(
             f"All {len(run.results)} tests passed. No forbidden marker belonging to another tenant "
@@ -209,14 +217,17 @@ def _contract_block(summary) -> list[str]:
     if not summary.contract_matched:
         lines.append(
             "> A configured response path never resolved. Tests against that surface scanned an "
-            "empty string and passed without testing anything. This run is not usable as evidence."
+            "empty string and passed without testing anything. **This run is not usable as evidence.**"
         )
         lines.append("")
     if not summary.ingest_verified:
+        # Same hard language as a contract failure, because it is the same class
+        # of problem: the run may have proved nothing.
+        waived = " The operator waived this requirement explicitly." if summary.ingest_verification_waived else ""
         lines.append(
-            "> `verify-ingest` did not pass for these fixtures against this endpoint. The canaries "
-            "being searched for may not exist in the index, in which case every test passes "
-            "regardless of whether the boundary holds."
+            "> `verify-ingest` did not pass for these fixtures against this endpoint, so canary "
+            "presence in the index was never confirmed. Every test may have passed against markers "
+            f"that exist nowhere.{waived} **This run is not usable as evidence.**"
         )
         lines.append("")
     return lines

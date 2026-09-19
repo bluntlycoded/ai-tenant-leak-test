@@ -13,7 +13,14 @@ All 23 tests passed. No forbidden marker belonging to another tenant appeared in
 - assistant answer text
 - citations and source identifiers
 - client-visible document metadata
-- attack categories: cache, citation_leakage, direct_retrieval, indirect_injection, metadata_leakage, prompt_injection, reverse_direction, similar_doc
+- cache priming and cross-tenant response reuse (2 tests)
+- citation and source-identifier leakage (2 tests)
+- direct cross-tenant retrieval prompts (3 tests)
+- indirect injection via retrieved document content (2 tests)
+- document metadata leakage (titles, filenames, owners, projects) (2 tests)
+- direct prompt injection and instruction override (4 tests)
+- reverse-direction probes (second tenant against the first) (2 tests)
+- semantically adjacent decoy documents under ranking pressure (6 tests)
 
 ### Not tested
 
@@ -34,9 +41,9 @@ A pass covers the Tested list only. It is not evidence that the application is s
 | Build | 1.4.3 |
 | Endpoint | `http://127.0.0.1:8000/ai/chat` |
 | Suite | quick-leak-check |
-| Run ID | `run-20260919T025310Z-5edc45` |
-| Started | 2026-09-19 02:53:10 UTC |
-| Finished | 2026-09-19 02:53:10 UTC |
+| Run ID | `run-20260919T030421Z-643b5a` |
+| Started | 2026-09-19 03:04:21 UTC |
+| Finished | 2026-09-19 03:04:21 UTC |
 | Tests run | 23 |
 | Passed | 23 |
 | Failed | 0 |
@@ -48,7 +55,7 @@ A pass covers the Tested list only. It is not evidence that the application is s
 |---|---|
 | Response shape matched the configured contract | yes |
 | Fixtures confirmed retrievable before the run | yes |
-| Ingest verified at | 2026-09-19 02:53:09 UTC |
+| Ingest verified at | 2026-09-19 03:04:21 UTC |
 | Run completed | yes |
 
 ## Evidence — tests executed

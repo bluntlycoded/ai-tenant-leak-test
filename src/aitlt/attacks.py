@@ -68,6 +68,7 @@ def run_suite(
     cases: list[TestCase],
     suite_name: str,
     on_result: Callable[[TestResult], None] | None = None,
+    require_ingest_verification: bool = True,
 ) -> TestRun:
     run = TestRun(
         run_id=f"run-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{secrets.token_hex(3)}",
@@ -103,6 +104,7 @@ def run_suite(
         },
         ingest_verified=verified,
         ingest_verified_at=verified_at,
+        require_ingest_verification=require_ingest_verification,
     )
     return run
 

@@ -38,12 +38,13 @@ def failing(cid: str = "t-02", kind: MarkerKind = MarkerKind.CANARY) -> TestResu
     return TestResult(test_case=case(cid), status="fail", matches=[match])
 
 
-def summarise(run: TestRun, *, resolved=None, configured=None, verified=True):
+def summarise(run: TestRun, *, resolved=None, configured=None, verified=True, require_ingest=True):
     return run.build_summary(
         surfaces_resolved=resolved if resolved is not None else ALL_RESOLVED,
         surfaces_configured=configured if configured is not None else FULL_CONTRACT,
         ingest_verified=verified,
         ingest_verified_at=None,
+        require_ingest_verification=require_ingest,
     )
 
 
@@ -85,6 +86,65 @@ def test_errored_test_makes_the_run_incomplete():
     s = summarise(make_run([passing(), errored]))
     assert s.verdict == "incomplete"
     assert s.tests_errored == 1
+
+
+def test_unverified_ingest_blocks_a_clean_pass():
+    """Canary presence unconfirmed means a clean result proves nothing."""
+    s = summarise(make_run([passing()]), verified=False)
+    assert s.verdict == "incomplete"
+    assert s.run_complete is False
+    assert s.ingest_verification_waived is False
+
+
+def test_waiver_is_recorded_and_still_not_a_pass():
+    """A waiver is the operator accepting an unsound run, not making it sound."""
+    s = summarise(make_run([passing()]), verified=False, require_ingest=False)
+    assert s.verdict == "incomplete"
+    assert s.run_complete is False
+    assert s.ingest_verification_waived is True
+    assert any("waived by operator" in item for item in s.scope_not_tested)
+
+
+def test_a_leak_outranks_an_incomplete_run():
+    """Incompleteness causes false negatives, never false positives.
+
+    So a finding is real evidence even when the run around it was unsound.
+    """
+    s = summarise(make_run([failing()]), verified=False)
+    assert s.verdict == "fail"
+    assert s.run_complete is False
+
+
+def test_leak_stands_even_when_the_contract_did_not_match():
+    s = summarise(
+        make_run([failing()]),
+        resolved={"answer": True, "citations": False, "metadata": True},
+    )
+    assert s.verdict == "fail"
+    assert s.contract_matched is False
+
+
+def test_severity_counts_distinct_markers_not_raw_matches():
+    """One unscoped path tripping many tests must not look like many bugs."""
+    run = make_run([failing("t-01"), failing("t-02"), failing("t-03")])
+    s = summarise(run)
+    assert s.critical_findings == 1  # same marker value in all three
+    assert s.distinct_markers_leaked == 1
+    assert s.total_matches == 3
+    assert s.tests_failed == 3
+
+
+def test_scope_tested_names_each_category_with_counts():
+    run = make_run(
+        [
+            passing("a-1"),
+            TestResult(test_case=case("b-1", "cache"), status="pass"),
+            TestResult(test_case=case("b-2", "cache"), status="pass"),
+        ]
+    )
+    s = summarise(run)
+    assert "cache priming and cross-tenant response reuse (2 tests)" in s.scope_tested
+    assert "direct cross-tenant retrieval prompts (1 tests)" in s.scope_tested
 
 
 def test_scope_tested_lists_only_resolved_surfaces():

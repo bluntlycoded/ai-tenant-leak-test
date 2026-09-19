@@ -30,7 +30,9 @@ Step 3 is not optional. If the fixtures never landed in the index, every leak te
 aitenant test --suite quick-leak-check --build 1.4.2 --fail-on critical
 ```
 
-Exit codes: `0` passed, `1` operational error (nothing was proven), `2` a leak at or above `--fail-on`.
+Exit codes: `0` passed, `1` the run proved nothing, `2` a leak at or above `--fail-on`.
+
+Step 3 is enforced, not advisory: `test` refuses to report a clean run as a pass unless `verify-ingest` has passed for these exact fixtures against this exact endpoint. Regenerating fixtures or changing endpoint invalidates it.
 
 ## What the report looks like
 
@@ -66,15 +68,34 @@ The JSON result opens with a `summary` block for wiring GitHub checks or alerts 
     "contract_matched": true,
     "ingest_verified": true,
     "ingest_verified_at": "2026-09-19T02:53:09Z",
+    "ingest_verification_waived": false,
     "tests_run": 23, "tests_passed": 23, "tests_failed": 0, "tests_errored": 0,
     "critical_findings": 0, "high_findings": 0, "medium_findings": 0,
-    "scope_tested": ["assistant answer text", "citations and source identifiers", "..."],
+    "distinct_markers_leaked": 0, "distinct_surfaces_leaked": 0, "total_matches": 0,
+    "scope_tested": ["assistant answer text", "cache priming and cross-tenant response reuse (2 tests)", "..."],
     "scope_not_tested": ["reranker behaviour and hybrid-search vector legs", "..."]
   }
 }
 ```
 
-`verdict` is `incomplete` — never `pass` — whenever a test errored or a configured surface never resolved. **A run that proved nothing must never be able to look like a clean one.**
+Severity counts are over **distinct markers**, not raw matches. One unscoped path leaking the same marker into twenty responses is one finding, not twenty — inflated counts would make a single bug look like a catastrophe and cost the report its credibility. `total_matches` keeps the raw number.
+
+### Verdict integrity
+
+`verdict` is `incomplete` — never `pass` — whenever a test errored, a configured surface never resolved, or ingest verification did not pass for these fixtures against this endpoint. **A run that proved nothing must never be able to look like a clean one.**
+
+One deliberate asymmetry: every completeness problem here causes false *negatives*, never false positives. An unresolved citations path or an unconfirmed canary can hide a leak; neither can invent one. So a **finding stands on its own evidence even when the run around it was unsound**, and `verdict` is `fail` in that case rather than `incomplete`.
+
+| State | Verdict | Exit |
+|---|---|---|
+| Verified, clean | `pass` | 0 |
+| Verified, leak found | `fail` | 2 |
+| Leak found, contract mismatch | `fail` | 2 |
+| Clean, ingest never verified | `incomplete` | 1 |
+| Clean, contract mismatch | `incomplete` | 1 |
+| Clean, ingest waived with `--allow-unverified-ingest` | `incomplete` | 0 |
+
+`--allow-unverified-ingest` exists for manual debugging. It spares your shell an error, it does **not** make the run sound: the verdict stays `incomplete` and the report records the waiver under Not tested.
 
 ## The supported target shape
 
@@ -192,7 +213,7 @@ Detection is exact string matching after Unicode and typography normalisation �
 ./scripts/calibrate.sh
 ```
 
-This starts the target under eight configurations and asserts the suite's verdict each time:
+This starts the target under nine configurations and asserts the suite's verdict each time:
 
 | Scenario | Expected |
 |---|---|
@@ -204,6 +225,9 @@ This starts the target under eight configurations and asserts the suite's verdic
 | self-owned poisoned document dumps the index | FAIL |
 | indirect injection via a leaked document | FAIL |
 | every leak enabled | FAIL |
+| correctly isolated, but ingest never verified | INCOMPLETE |
+
+The last one calibrates verdict integrity rather than leak detection: a clean target with no ingest proof must report `incomplete`, never `pass`. That is the false-clean failure mode the product exists to prevent, so it gets the same treatment as a leak path.
 
 The sixth scenario was found by the suite, not designed into it: with retrieval scoping fully intact, a tenant's *own* poisoned document made the model enumerate every title in the index, including the other tenant's. A cross-tenant leak on a path that never touches retrieval scoping.
 

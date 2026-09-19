@@ -37,6 +37,14 @@ run_scenario() {
     sleep 0.25
   done
 
+  # Required before every run: without a passing ingest check, a clean result
+  # is reported as `incomplete` rather than `pass`, which is the point.
+  if [ "${SKIP_VERIFY:-0}" = "1" ]; then
+    rm -f fixtures/.ingest-verified.json
+  else
+    "$AITENANT" verify-ingest >/dev/null 2>&1
+  fi
+
   local out exit_code
   out="$("$AITENANT" test --format json 2>&1)"
   exit_code=$?
@@ -46,7 +54,7 @@ run_scenario() {
 
   local actual="PASS"
   [ "$exit_code" -eq 2 ] && actual="FAIL"
-  [ "$exit_code" -eq 1 ] && actual="ERROR"
+  [ "$exit_code" -eq 1 ] && actual="INCOMPLETE"
 
   local failed_ids
   failed_ids="$(echo "$out" | grep -oE '  FAIL [a-z]{2}-[0-9]{2}' | awk '{print $2}' | tr '\n' ' ')"
@@ -78,6 +86,12 @@ run_scenario "indirect injection via leaked doc"     FAIL LEAK_POST_FILTER=1 LEA
 run_scenario "every leak enabled"                    FAIL LEAK_POST_FILTER=1 LEAK_CITATION_RESOLVER=1 \
                                                           LEAK_METADATA=1 LEAK_SEMANTIC_CACHE=1 \
                                                           LEAK_INDIRECT_INJECTION=1
+
+# Verdict integrity, not leak detection: a correctly isolated target with no
+# ingest proof must report INCOMPLETE, never PASS. This is the false-clean
+# failure mode the product exists to prevent, so it gets calibrated too.
+SKIP_VERIFY=1 run_scenario "secure but ingest unverified"  INCOMPLETE
+SKIP_VERIFY=0
 
 echo
 if [ "$fail" -eq 0 ]; then

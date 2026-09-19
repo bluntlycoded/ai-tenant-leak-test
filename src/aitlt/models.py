@@ -203,13 +203,34 @@ SCOPE_NOT_TESTED = [
 ]
 
 
+#: Human-readable descriptions of each attack category, for the Tested list.
+#: Written for someone answering a security questionnaire, not for a developer
+#: reading test ids.
+CATEGORY_LABELS = {
+    "direct_retrieval": "direct cross-tenant retrieval prompts",
+    "similar_doc": "semantically adjacent decoy documents under ranking pressure",
+    "prompt_injection": "direct prompt injection and instruction override",
+    "indirect_injection": "indirect injection via retrieved document content",
+    "citation_leakage": "citation and source-identifier leakage",
+    "metadata_leakage": "document metadata leakage (titles, filenames, owners, projects)",
+    "cache": "cache priming and cross-tenant response reuse",
+    "reverse_direction": "reverse-direction probes (second tenant against the first)",
+}
+
+
 class RunSummary(BaseModel):
     """Machine-readable verdict, first key in the JSON result.
 
     Exists so a GitHub check, a Slack hook, or a procurement reviewer can read
-    the outcome and its bounds without parsing findings. `run_complete` and
-    `contract_matched` matter as much as the verdict: an under-scoped run that
-    reports no leaks is the failure mode this product exists to avoid.
+    the outcome and its bounds without parsing findings. `run_complete`,
+    `contract_matched` and `ingest_verified` matter as much as the verdict: an
+    under-scoped run that reports no leaks is the failure mode this product
+    exists to avoid, so none of them may be false while the verdict reads pass.
+
+    Severity counts are over *distinct markers*, not raw matches. One unscoped
+    path leaking five markers into twenty responses is five findings, not a
+    hundred — inflated counts would make a single bug look like a catastrophe
+    and cost the report its credibility. `total_matches` keeps the raw number.
     """
 
     verdict: Literal["pass", "fail", "incomplete"]
@@ -217,6 +238,9 @@ class RunSummary(BaseModel):
     contract_matched: bool
     ingest_verified: bool
     ingest_verified_at: datetime | None = None
+    #: True when the operator explicitly waived the ingest requirement. Recorded
+    #: so a reader can tell a verified run from a deliberately unverified one.
+    ingest_verification_waived: bool = False
     tests_run: int = 0
     tests_passed: int = 0
     tests_failed: int = 0
@@ -224,6 +248,12 @@ class RunSummary(BaseModel):
     critical_findings: int = 0
     high_findings: int = 0
     medium_findings: int = 0
+    #: Distinct marker values that leaked, regardless of how often.
+    distinct_markers_leaked: int = 0
+    #: Distinct (surface, marker kind) pairs — closest proxy for root causes.
+    distinct_surfaces_leaked: int = 0
+    #: Raw match count, for anyone who wants the unaggregated number.
+    total_matches: int = 0
     scope_tested: list[str] = Field(default_factory=list)
     scope_not_tested: list[str] = Field(default_factory=lambda: list(SCOPE_NOT_TESTED))
 
@@ -260,12 +290,26 @@ class TestRun(BaseModel):
         surfaces_configured: dict[str, str | None],
         ingest_verified: bool,
         ingest_verified_at: datetime | None,
+        require_ingest_verification: bool = True,
     ) -> RunSummary:
         """Derive the summary from what actually happened, never from intent."""
-        counts = {Severity.CRITICAL: 0, Severity.HIGH: 0, Severity.MEDIUM: 0}
+        # Deduplicate by marker value: one unscoped path leaking the same marker
+        # into twenty responses is one finding, not twenty.
+        by_severity: dict[Severity, set[str]] = {
+            Severity.CRITICAL: set(),
+            Severity.HIGH: set(),
+            Severity.MEDIUM: set(),
+        }
+        distinct_markers: set[str] = set()
+        distinct_surfaces: set[tuple[str, str]] = set()
+        total_matches = 0
         for result in self.failures:
             for match in result.matches:
-                counts[match.severity] += 1
+                total_matches += 1
+                by_severity[match.severity].add(match.marker.value)
+                distinct_markers.add(match.marker.value)
+                distinct_surfaces.add((match.location, match.marker.kind.value))
+        counts = {sev: len(values) for sev, values in by_severity.items()}
 
         # A configured path that never resolved means that surface was scanned
         # as an empty string — its tests passed without testing anything.
@@ -285,9 +329,14 @@ class TestRun(BaseModel):
         for surface, path in surfaces_configured.items():
             if path is not None and surfaces_resolved.get(surface, False):
                 tested.append(label.get(surface, surface))
-        categories = sorted({r.test_case.category for r in self.results})
-        if categories:
-            tested.append("attack categories: " + ", ".join(categories))
+        # One bullet per attack category, with counts. A single compressed line
+        # is useless to someone filling in a security questionnaire.
+        per_category: dict[str, int] = {}
+        for result in self.results:
+            per_category[result.test_case.category] = per_category.get(result.test_case.category, 0) + 1
+        for category in sorted(per_category):
+            desc = CATEGORY_LABELS.get(category, category.replace("_", " "))
+            tested.append(f"{desc} ({per_category[category]} tests)")
 
         not_tested = list(SCOPE_NOT_TESTED)
         for surface, path in surfaces_configured.items():
@@ -296,11 +345,27 @@ class TestRun(BaseModel):
             elif surface in unresolved:
                 not_tested.insert(0, f"{label.get(surface, surface)} (configured as `{path}` but never resolved)")
 
-        run_complete = not self.errors and contract_matched
-        if not run_complete:
-            verdict: Literal["pass", "fail", "incomplete"] = "incomplete"
-        elif self.failures:
-            verdict = "fail"
+        # A missing or stale ingest proof is the same class of problem as an
+        # unresolved surface: the canaries may not exist in the index, so a clean
+        # result proves nothing. It invalidates the verdict unless explicitly
+        # waived, and the waiver is recorded rather than hidden.
+        waived = not ingest_verified and not require_ingest_verification
+        if waived:
+            not_tested.insert(0, "ingest verification (waived by operator — canary presence unconfirmed)")
+
+        # Completeness is about whether the exercise was sound. A waiver is the
+        # operator accepting an unsound run, not making it a sound one.
+        run_complete = not self.errors and contract_matched and ingest_verified
+
+        # Asymmetry that matters: every completeness problem here causes false
+        # NEGATIVES, not false positives. An unresolved citations path or an
+        # unverified canary can hide a leak; neither can invent one. So a
+        # positive finding stands on its own evidence even when the run was
+        # incomplete, while a clean result does not.
+        if self.failures:
+            verdict: Literal["pass", "fail", "incomplete"] = "fail"
+        elif not run_complete:
+            verdict = "incomplete"
         else:
             verdict = "pass"
 
@@ -310,6 +375,7 @@ class TestRun(BaseModel):
             contract_matched=contract_matched,
             ingest_verified=ingest_verified,
             ingest_verified_at=ingest_verified_at,
+            ingest_verification_waived=waived,
             tests_run=len(self.results),
             tests_passed=len([r for r in self.results if r.status == "pass"]),
             tests_failed=len(self.failures),
@@ -317,6 +383,9 @@ class TestRun(BaseModel):
             critical_findings=counts[Severity.CRITICAL],
             high_findings=counts[Severity.HIGH],
             medium_findings=counts[Severity.MEDIUM],
+            distinct_markers_leaked=len(distinct_markers),
+            distinct_surfaces_leaked=len(distinct_surfaces),
+            total_matches=total_matches,
             scope_tested=tested,
             scope_not_tested=not_tested,
         )
