@@ -41,9 +41,9 @@ A pass covers the Tested list only. It is not evidence that the application is s
 | Build | 1.4.3 |
 | Endpoint | `http://127.0.0.1:8000/ai/chat` |
 | Suite | quick-leak-check |
-| Run ID | `run-20260919T030421Z-643b5a` |
-| Started | 2026-09-19 03:04:21 UTC |
-| Finished | 2026-09-19 03:04:21 UTC |
+| Run ID | `run-20260919T031237Z-63124d` |
+| Started | 2026-09-19 03:12:37 UTC |
+| Finished | 2026-09-19 03:12:37 UTC |
 | Tests run | 23 |
 | Passed | 23 |
 | Failed | 0 |
@@ -55,7 +55,7 @@ A pass covers the Tested list only. It is not evidence that the application is s
 |---|---|
 | Response shape matched the configured contract | yes |
 | Fixtures confirmed retrievable before the run | yes |
-| Ingest verified at | 2026-09-19 03:04:21 UTC |
+| Ingest verified at | 2026-09-19 03:12:36 UTC |
 | Run completed | yes |
 
 ## Evidence — tests executed

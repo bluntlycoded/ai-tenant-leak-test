@@ -9,6 +9,7 @@ Exit codes are part of the contract:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import typer
@@ -36,6 +37,21 @@ EXIT_OPERATIONAL = 1
 EXIT_LEAK = 2
 
 CONFIG_PATH = "aitenant.yaml"
+
+
+#: Environment variables set by the common CI providers. GitHub Actions,
+#: GitLab, CircleCI, Travis and Buildkite all set CI=true; Jenkins and
+#: TeamCity are detected by their own markers.
+_CI_MARKERS = ("CI", "GITHUB_ACTIONS", "GITLAB_CI", "JENKINS_URL", "BUILDKITE", "TEAMCITY_VERSION")
+
+
+def running_in_ci() -> str | None:
+    """Return the marker naming the CI provider, or None when interactive."""
+    for name in _CI_MARKERS:
+        value = os.environ.get(name, "")
+        if value and value.lower() not in {"0", "false", "no"}:
+            return name
+    return None
 
 
 def _load_config(path: str) -> Config:
@@ -218,12 +234,27 @@ def test(
         False,
         "--allow-unverified-ingest",
         help=(
-            "Run without a passing verify-ingest. For manual debugging only — the result "
-            "is marked incomplete and is not usable as evidence."
+            "Manual debugging only. Runs without a passing verify-ingest. Refused in CI, "
+            "and the result is still marked incomplete and unusable as evidence."
         ),
     ),
 ) -> None:
     """Run the leak suite against the configured endpoint."""
+    # The waiver exists so someone can poke at a target from their laptop. In CI
+    # it would silently convert the regression gate into theatre, so it is
+    # refused rather than warned about.
+    ci_marker = running_in_ci()
+    if allow_unverified_ingest and ci_marker:
+        console.print(
+            f"[red]--allow-unverified-ingest is refused in CI[/red] (detected via ${ci_marker})."
+        )
+        console.print(
+            "It is a manual debugging aid, not a way to make a pipeline green. Without a "
+            "passing verify-ingest the canaries may not exist in the index, so the suite would "
+            "gate on nothing. Run [bold]aitenant verify-ingest[/bold] as a prior step instead."
+        )
+        raise typer.Exit(EXIT_OPERATIONAL)
+
     config = _load_config(config_path)
     if environment:
         config.environment = environment
@@ -323,7 +354,11 @@ def _summarise_and_exit(run: TestRun, fail_on: Severity, ingest_reason: str = ""
             "nothing. Run [bold]aitenant verify-ingest[/bold] first."
         )
         if summary.ingest_verification_waived:
-            console.print("[yellow]Waived by --allow-unverified-ingest. Recorded in the report.[/yellow]")
+            console.print(
+                "[yellow]Waived by --allow-unverified-ingest — debugging only.[/yellow] "
+                "This run is not evidence and must not be attached to a security review. "
+                "The waiver is recorded in the report."
+            )
         else:
             console.print(
                 "[dim]For manual debugging only, --allow-unverified-ingest runs anyway.[/dim]"

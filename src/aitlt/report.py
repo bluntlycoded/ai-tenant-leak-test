@@ -86,12 +86,29 @@ def to_markdown(run: TestRun) -> str:
     lines.append("")
     lines.append(f"**{verdict}**")
     lines.append("")
-    if summary and not summary.run_complete:
+    if summary and not summary.run_complete and not failures:
         lines.append(
             "This run was **incomplete**. Some part of the suite did not execute or did not "
             "reach the surface it was written to test, so the absence of a finding below does "
-            "not mean the boundary held. Resolve the issues in Errors and Connector contract, "
-            "then re-run before treating this report as evidence."
+            "not mean the boundary held. Resolve the issues under Connector contract and "
+            "Errors, then re-run before treating this report as evidence."
+        )
+        lines.append("")
+    if summary and not summary.run_complete and failures:
+        # Spelled out for a reader who is not going to reason about the
+        # difference between a false positive and a false negative.
+        lines.append(
+            "**A leak was observed, but parts of this run were incomplete.** The findings below "
+            "are valid — a marker either appeared or it did not, and nothing about an incomplete "
+            "run can make one appear that was not there. What cannot be trusted is the *absence* "
+            "of further findings: boundaries that went untested may also be leaking. Fix what is "
+            "listed under Connector contract and re-run to establish the full picture."
+        )
+        lines.append("")
+    if summary and summary.ingest_verification_waived:
+        lines.append(
+            "> Ingest verification was waived by the operator. This run is a debugging aid, "
+            "not evidence, and should not be attached to a security review."
         )
         lines.append("")
     if failures:

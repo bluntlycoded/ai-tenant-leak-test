@@ -11,6 +11,7 @@ import json
 import pytest
 
 from aitlt import stamp
+from aitlt.cli import running_in_ci
 from aitlt.models import Marker, MarkerKind, Match, Observation, TestCase, TestResult, TestRun
 
 FULL_CONTRACT = {"answer": "answer", "citations": "citations", "metadata": "metadata"}
@@ -163,6 +164,26 @@ def test_summary_serialises_first_in_json():
     run = make_run([passing()])
     run.summary = summarise(run)
     assert next(iter(json.loads(run.model_dump_json()))) == "summary"
+
+
+# ----------------------------------------------------------------- ci guard
+
+
+@pytest.mark.parametrize("marker", ["CI", "GITHUB_ACTIONS", "GITLAB_CI", "JENKINS_URL", "BUILDKITE"])
+def test_ci_is_detected_from_each_provider_marker(monkeypatch, marker):
+    for name in ["CI", "GITHUB_ACTIONS", "GITLAB_CI", "JENKINS_URL", "BUILDKITE", "TEAMCITY_VERSION"]:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(marker, "true")
+    assert running_in_ci() == marker
+
+
+def test_falsy_ci_values_are_not_ci(monkeypatch):
+    """Some shells export CI=false rather than unsetting it."""
+    for name in ["CI", "GITHUB_ACTIONS", "GITLAB_CI", "JENKINS_URL", "BUILDKITE", "TEAMCITY_VERSION"]:
+        monkeypatch.delenv(name, raising=False)
+    for value in ("", "0", "false", "no"):
+        monkeypatch.setenv("CI", value)
+        assert running_in_ci() is None
 
 
 # --------------------------------------------------------------------- stamp

@@ -95,7 +95,23 @@ One deliberate asymmetry: every completeness problem here causes false *negative
 | Clean, contract mismatch | `incomplete` | 1 |
 | Clean, ingest waived with `--allow-unverified-ingest` | `incomplete` | 0 |
 
-`--allow-unverified-ingest` exists for manual debugging. It spares your shell an error, it does **not** make the run sound: the verdict stays `incomplete` and the report records the waiver under Not tested.
+When a run is both incomplete *and* found a leak, the report says so in the Verdict section rather than leaving the reader to work it out:
+
+> **A leak was observed, but parts of this run were incomplete.** The findings below are valid — a marker either appeared or it did not, and nothing about an incomplete run can make one appear that was not there. What cannot be trusted is the *absence* of further findings.
+
+### `--allow-unverified-ingest`
+
+Manual debugging only. Specifically:
+
+| | |
+|---|---|
+| Interactive use, poking at a target | allowed |
+| **CI pipelines** | **refused** — exits 1 with an explanation |
+| **Generating evidence for a review** | **never** — the report says so on its own face |
+
+It spares your shell an error; it does not make the run sound. The verdict stays `incomplete`, `ingest_verification_waived` is set, the waiver is listed under Not tested, and the Verdict section states the run is a debugging aid and must not be attached to a security review.
+
+CI refusal is enforced, not advised — detected via `CI`, `GITHUB_ACTIONS`, `GITLAB_CI`, `JENKINS_URL`, `BUILDKITE`, or `TEAMCITY_VERSION`. A flag that can turn a regression gate into theatre should not be one `--flag` away in a pipeline; run `verify-ingest` as a prior step instead.
 
 ## The supported target shape
 
