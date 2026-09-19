@@ -55,7 +55,12 @@ jobs:
           python -m pip install -e ".[devtarget]" pytest
 
       - name: Unit tests
-        run: python -m pytest tests/ -q
+        run: python -m pytest -q -m "not e2e"
+
+      - name: End-to-end lifecycle tests
+        # Live devtarget over a real socket: seed, verify, test, then the two
+        # ways a run stops being trustworthy afterwards.
+        run: python -m pytest -q -m e2e
 
       - name: Generate fixtures
         run: aitenant init

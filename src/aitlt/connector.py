@@ -17,13 +17,45 @@ from .models import Observation
 
 
 class ConnectorError(Exception):
-    pass
+    """Base for every reason a request could not produce a usable observation.
+
+    All of these mark the test as `error`, which makes the run incomplete. That
+    is deliberate: a misfit endpoint must fail loudly and fast rather than
+    yielding a confusing half-success that reads as a clean report.
+    """
+
+
+class AuthError(ConnectorError):
+    """401/403. Never retried — a wrong token will still be wrong in 500ms."""
+
+
+class ConnectorTimeout(ConnectorError):
+    """Transport failure or timeout that survived every retry."""
+
+
+class HttpStatusError(ConnectorError):
+    """Non-2xx that is not an auth failure."""
+
+
+class MalformedResponseError(ConnectorError):
+    """Response body could not be parsed as the configured contract."""
+
+
+class UnresolvedPathError(MalformedResponseError):
+    """The required answer path is absent from the response.
+
+    Distinct from an empty answer: absent means the configured contract does not
+    describe this endpoint, and every subsequent test would scan nothing.
+    """
 
 
 class Connector:
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, transport: httpx.BaseTransport | None = None):
         self.config = config
-        self._client = httpx.Client(timeout=config.endpoint.timeout_seconds)
+        self._client = httpx.Client(
+            timeout=config.endpoint.timeout_seconds,
+            transport=transport,
+        )
 
     def __enter__(self) -> "Connector":
         return self
@@ -49,25 +81,51 @@ class Connector:
 
         response, attempts = self._send(ep, headers, body)
 
+        if response.status_code in (401, 403):
+            raise AuthError(
+                f"HTTP {response.status_code} for tenant {tenant_id!r}. The test user's "
+                f"credential was rejected — check the token behind this tenant's config."
+            )
+        if response.status_code >= 400:
+            raise HttpStatusError(
+                f"endpoint returned HTTP {response.status_code}: {response.text[:300]}"
+            )
+
         try:
             payload = response.json()
         except ValueError:
             # Not JSON — still usable. Treat the whole body as the answer so a
             # plain-text endpoint does not silently test nothing.
+            if not response.text.strip():
+                raise MalformedResponseError(
+                    "response was neither JSON nor text; nothing to scan"
+                ) from None
             return Observation(
                 answer=response.text,
                 http_status=response.status_code,
                 raw=None,
-                schema_found={"answer": bool(response.text), "citations": False, "metadata": False},
+                schema_found={"answer": True, "citations": False, "metadata": False},
                 attempts=attempts,
+            )
+
+        if not isinstance(payload, dict):
+            raise MalformedResponseError(
+                f"expected a JSON object at the top level, got {type(payload).__name__}"
             )
 
         answer = dig(payload, ep.response_text_field)
         citations = dig(payload, ep.citations_field) if ep.citations_field else None
         metadata = dig(payload, ep.metadata_field) if ep.metadata_field else None
 
-        if answer is None and response.status_code >= 400:
-            raise ConnectorError(f"endpoint returned HTTP {response.status_code}: {response.text[:300]}")
+        # The answer path is the one part of the contract that cannot be
+        # optional. If it is absent, the configured contract does not describe
+        # this endpoint and every test would scan an empty string.
+        if answer is None:
+            raise UnresolvedPathError(
+                f"response_text_field `{ep.response_text_field}` did not resolve. "
+                f"Top-level keys present: {sorted(payload)[:10]}. "
+                f"Fix the dotted path in your config."
+            )
 
         return Observation(
             answer=answer if isinstance(answer, str) else ("" if answer is None else str(answer)),
@@ -76,7 +134,7 @@ class Connector:
             http_status=response.status_code,
             raw=payload if isinstance(payload, dict) else {"value": payload},
             schema_found={
-                "answer": answer is not None,
+                "answer": True,
                 # Only meaningful when the path is configured at all.
                 "citations": citations is not None if ep.citations_field else False,
                 "metadata": metadata is not None if ep.metadata_field else False,
@@ -93,21 +151,22 @@ class Connector:
         response is never re-sent, which keeps the cache tests honest.
         """
         last_error: Exception | None = None
-        attempts = ep.max_retries + 1
+        attempts = max(1, ep.max_retries + 1)
         for attempt in range(1, attempts + 1):
             try:
                 response = self._client.request(ep.method, ep.url, headers=headers, json=body)
             except httpx.HTTPError as exc:
                 last_error = exc
             else:
+                # 4xx is the caller's fault and will not improve on retry.
                 if response.status_code < 500 or attempt == attempts:
                     return response, attempt
-                last_error = ConnectorError(f"HTTP {response.status_code}")
+                last_error = HttpStatusError(f"HTTP {response.status_code}")
 
             if attempt < attempts:
                 time.sleep(ep.retry_backoff_seconds * attempt)
 
-        raise ConnectorError(
+        raise ConnectorTimeout(
             f"request to {ep.url} failed after {attempts} attempt(s): {last_error}"
         ) from last_error
 

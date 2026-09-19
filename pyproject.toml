@@ -30,3 +30,6 @@ testpaths = ["tests"]
 # The domain models are named TestCase/TestResult/TestRun. Tests here are all
 # functions, so stop pytest trying to collect those classes.
 python_classes = "_NeverMatches"
+markers = [
+    "e2e: end-to-end tests that spawn a live devtarget process (slower)",
+]

@@ -16,6 +16,11 @@ from .detector import scan
 from .models import FixtureSet, TestCase, TestResult, TestRun
 
 
+#: Stop the run after this many back-to-back connector errors. Auth failures
+#: and contract mismatches do not resolve themselves partway through a suite.
+ABORT_AFTER_CONSECUTIVE_ERRORS = 3
+
+
 class SuiteError(Exception):
     pass
 
@@ -82,14 +87,36 @@ def run_suite(
     # response and present in another, so one miss is not a contract failure.
     surfaces_resolved = {"answer": False, "citations": False, "metadata": False}
 
+    consecutive_errors = 0
+    aborted = False
+
     with Connector(config) as connector:
-        for case in cases:
+        for index, case in enumerate(cases):
+            if aborted:
+                # Record the rest rather than dropping them, so the report shows
+                # these boundaries as untested instead of silently absent.
+                run.results.append(
+                    TestResult(
+                        test_case=case,
+                        status="error",
+                        error="not run — aborted after repeated connector failures",
+                    )
+                )
+                continue
+
             result = _run_case(connector, fixtures, case)
             for key, present in result.observation.schema_found.items():
                 surfaces_resolved[key] = surfaces_resolved.get(key, False) or present
             run.results.append(result)
             if on_result:
                 on_result(result)
+
+            # A misfit endpoint should cost three requests to discover, not
+            # twenty-three. Auth and contract failures never fix themselves
+            # mid-run.
+            consecutive_errors = consecutive_errors + 1 if result.status == "error" else 0
+            if consecutive_errors >= ABORT_AFTER_CONSECUTIVE_ERRORS and index + 1 < len(cases):
+                aborted = True
 
     run.finished_at = datetime.now(timezone.utc)
 

@@ -1,9 +1,17 @@
 """Command line interface.
 
-Exit codes are part of the contract:
-    0  all tests passed
-    1  operational or configuration error (nothing was proven)
-    2  one or more leak tests failed at or above the --fail-on threshold
+Exit codes are part of the contract. They gate pipelines, so they are narrower
+than the verdict and do not always agree with it:
+
+    0  nothing to act on in CI. Either a clean verified run (verdict `pass`),
+       findings that all sat below --fail-on (verdict `fail`), or a locally
+       waived debug run (verdict `incomplete`).
+    1  the run proved nothing: a configured surface never resolved, ingest was
+       never verified, or tests errored. Verdict `incomplete`.
+    2  a leak at or above --fail-on. Verdict `fail`.
+
+When the two differ, the verdict in the report is the one to cite. Exit 0 with
+verdict `fail` is the dangerous case, so the terminal output shouts about it.
 """
 
 from __future__ import annotations
@@ -366,6 +374,12 @@ def _summarise_and_exit(run: TestRun, fail_on: Severity, ingest_reason: str = ""
 
     console.print()
 
+    # Always state the verdict verbatim, so the terminal and the report can
+    # never be read as disagreeing.
+    if summary:
+        colour = {"pass": "green", "fail": "red", "incomplete": "yellow"}[summary.verdict]
+        console.print(f"Verdict: [{colour}][bold]{summary.verdict.upper()}[/bold][/{colour}]")
+
     # Precedence: a leak outranks everything. Every completeness problem above
     # causes false negatives, never false positives — so a finding is real
     # evidence even when the run around it was unsound.
@@ -382,7 +396,26 @@ def _summarise_and_exit(run: TestRun, fail_on: Severity, ingest_reason: str = ""
                 "boundaries went untested.[/yellow]"
             )
         if not gating:
-            console.print(f"[yellow]No finding reached the --fail-on {fail_on.value} threshold; exiting 0.[/yellow]")
+            # The most dangerous state in the tool: real leaks, green shell.
+            # Anyone skimming CI output must not read this as "nothing found".
+            by_sev = ", ".join(
+                f"{count} {sev}"
+                for sev, count in (
+                    ("critical", summary.critical_findings if summary else 0),
+                    ("high", summary.high_findings if summary else 0),
+                    ("medium", summary.medium_findings if summary else 0),
+                )
+                if count
+            )
+            console.print()
+            console.print(
+                f"[bold yellow]!! LEAKS FOUND BELOW THRESHOLD — EXITING 0 !![/bold yellow]"
+            )
+            console.print(
+                f"[yellow]{by_sev or 'findings'} recorded. These are real leaks.[/yellow] "
+                f"The build is green only because --fail-on was set to "
+                f"[bold]{fail_on.value}[/bold]. Lower the threshold to gate on them."
+            )
             raise typer.Exit(EXIT_OK)
         raise typer.Exit(EXIT_LEAK)
 
