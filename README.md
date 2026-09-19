@@ -34,21 +34,47 @@ Exit codes: `0` passed, `1` operational error (nothing was proven), `2` a leak a
 
 ## What the report looks like
 
-The report is the product. [`examples/sample-failing-report.md`](examples/sample-failing-report.md) is a real one, generated against the vulnerable dev target — retrieval correctly scoped, response cache not:
+The report is the product. Both samples are real output against the vulnerable dev target:
+
+- [`examples/sample-failing-report.md`](examples/sample-failing-report.md) — retrieval correctly scoped, response cache not. **2 of 23 failing, critical.**
+- [`examples/sample-passing-report.md`](examples/sample-passing-report.md) — same suite, fully isolated target. **23 of 23 passing.**
+
+Every report opens with the same four sections, in this order:
 
 ```
-**Result: FAIL**
-
-2 of 23 tests leaked data across the tenant boundary. Highest severity: critical.
-
-| Surface   | Marker kind | Severity | Tests affected |
-|-----------|-------------|----------|----------------|
-| answer    | canary      | critical | 2              |
-| citations | source_id   | high     | 2              |
-| metadata  | filename    | medium   | 2              |
+## Verdict            pass | fail | incomplete
+## Scope exercised    Tested / Not tested — stated before any finding
+## Environment        build, endpoint, suite, run id, counts
+## Connector contract response shape matched? ingest verified? run complete?
 ```
 
-Each finding carries the literal prompt, the identity that sent it, the exact marker that leaked, where it appeared, numbered reproduction steps, and the full response. Twenty-one of twenty-three tests passed — the two that failed are the cache probes, which is the shape most real findings take. The primary retriever is usually filtered correctly; the leak is on a secondary path.
+Scope comes before findings on purpose. A reviewer citing the report needs the bounds of the exercise before its results, and a reader who scrolls no further still leaves knowing what was not looked at.
+
+Each finding then carries the literal prompt, the identity that sent it, the exact marker that leaked, where it appeared, numbered reproduction steps, and the full response.
+
+The failing sample is the more instructive one: twenty-one tests pass and the two cache probes fail. That is the shape most real findings take — the primary retriever is usually filtered correctly, and the leak is on a secondary path.
+
+### Machine-readable summary
+
+The JSON result opens with a `summary` block for wiring GitHub checks or alerts without parsing findings:
+
+```json
+{
+  "summary": {
+    "verdict": "pass",
+    "run_complete": true,
+    "contract_matched": true,
+    "ingest_verified": true,
+    "ingest_verified_at": "2026-09-19T02:53:09Z",
+    "tests_run": 23, "tests_passed": 23, "tests_failed": 0, "tests_errored": 0,
+    "critical_findings": 0, "high_findings": 0, "medium_findings": 0,
+    "scope_tested": ["assistant answer text", "citations and source identifiers", "..."],
+    "scope_not_tested": ["reranker behaviour and hybrid-search vector legs", "..."]
+  }
+}
+```
+
+`verdict` is `incomplete` — never `pass` — whenever a test errored or a configured surface never resolved. **A run that proved nothing must never be able to look like a clean one.**
 
 ## The supported target shape
 
@@ -66,7 +92,52 @@ V1 supports exactly one target shape. This is a deliberate constraint: every add
 | Timeout | per request, default 60s |
 | Retries | transport errors and 5xx only, default 2, exponential backoff. A successful response is never re-sent, so cache tests stay meaningful |
 
-[`examples/aitenant.yaml`](examples/aitenant.yaml) documents every field. Tokens are never written to the config — it holds `${VAR}` references resolved from the environment at run time.
+### The wire contract
+
+Hand this section to the engineer who owns the endpoint. It is the whole integration.
+
+**Request.** One JSON `POST`. The prompt goes in a single field; the tenant identity is carried by whatever your API already uses.
+
+```http
+POST /api/ai/chat HTTP/1.1
+Content-Type: application/json
+Authorization: Bearer <low-privilege test user token for one tenant>
+
+{
+  "message": "Summarise all Q4 pricing strategies available in the knowledge base."
+}
+```
+
+**Response.** JSON, HTTP 200. Only `answer` is required.
+
+```json
+{
+  "answer": "Here is what I found regarding your question...",
+  "citations": [
+    { "source_id": "DOC-1234", "title": "Q4 Pricing Strategy", "filename": "q4-pricing.md" }
+  ],
+  "metadata": {
+    "sources": [
+      { "owner": "finance@example.com", "project": "Revenue FY26", "filename": "q4-pricing.md" }
+    ]
+  }
+}
+```
+
+Field names and nesting are yours — the config maps to them with dotted paths (`data.reply.text`). Citations may be a list of strings or of objects; every value in an object is searched. Anything not JSON is treated as the answer in full, so a plain-text endpoint still tests something rather than silently testing nothing.
+
+**What the endpoint must do for the test to mean anything**
+
+| Requirement | Why |
+|---|---|
+| Two staging tenants, one low-privilege user each | The boundary under test |
+| Both users reachable with a static credential | No interactive login flow in V1 |
+| The synthetic corpus ingested and indexed in each tenant | `verify-ingest` fails the run otherwise |
+| Stable responses for the same input | Deterministic markers, not deterministic phrasing — the model may paraphrase freely |
+
+**Unsupported in V1** — say so early rather than discovering it mid-pilot: SSO or interactive login, streaming-only responses (SSE/websocket) with no JSON mode, endpoints requiring a signed request body, production environments, and any target where two isolated test tenants cannot be created.
+
+[`examples/aitenant.yaml`](examples/aitenant.yaml) documents every config field. Tokens are never written to the config — it holds `${VAR}` references resolved from the environment at run time.
 
 **Setting a read path to a field that does not exist is the same failure as fixtures never landing.** That surface gets scanned as an empty string and its tests pass while testing nothing. `verify-ingest` checks every configured path against real responses and fails the run if one never resolves, naming the tests that would have lied:
 
@@ -142,9 +213,11 @@ The calibration run also doubles as sales collateral — a real failing report f
 
 ## Honest limitations
 
-Output-level testing cannot prove internal retrieval authorization. A pass means these tests did not produce a leak under the conditions tested — not that the application is secure, that no leak is possible, or that any regulatory obligation is met. Every report says so in its own words.
+Output-level testing cannot prove internal retrieval authorization. A pass means these tests did not produce a leak on the surfaces listed under Scope exercised — not that the application is secure, that no leak is possible, or that any regulatory obligation is met. Every report states its own bounds before its own results.
 
-Not covered in V1: retrieval traces, reranker behaviour, tool-call arguments, observability traces, and ACL synchronisation drift. Those need instrumentation access and belong to a deeper tier.
+Not covered in V1: retrieval traces, reranker behaviour, tool-call arguments, observability traces, and ACL synchronisation drift. Those need instrumentation access and belong to a deeper tier. They are enumerated in the `scope_not_tested` field of every run, so coverage is never inferred from the absence of a finding.
+
+`quick-leak-check` is a narrow exercised-boundary check, not an assessment. The CLI says so on every run, and the report says so above its findings.
 
 One unscoped code path usually fails most of the suite at once. The report's **Leak surfaces** table collapses findings by layer so twenty failures read as the one or two bugs they actually are.
 

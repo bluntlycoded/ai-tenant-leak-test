@@ -18,6 +18,7 @@ from rich.table import Table
 
 from . import fixtures as fixtures_mod
 from . import report as report_mod
+from . import stamp
 from .attacks import SuiteError, load_suite, resolve_suite_path, run_suite, validate_against_fixtures
 from .config import DEFAULT_CONFIG, Config, ConfigError
 from .connector import Connector, ConnectorError
@@ -182,8 +183,10 @@ def verify_ingest(config_path: str = typer.Option(CONFIG_PATH, "--config", "-c")
     console.print(schema)
 
     if all_ok and schema_ok:
+        written = stamp.write(config.fixtures_path, ep.url)
         console.print()
         console.print("[green]Fixtures are retrievable and every configured surface resolved.[/green] The suite will test real paths.")
+        console.print(f"[dim]Stamped {written} — runs against these fixtures will record ingest as verified.[/dim]")
         raise typer.Exit(EXIT_OK)
 
     console.print()
@@ -276,15 +279,43 @@ def report(
 def _summarise_and_exit(run: TestRun, fail_on: Severity) -> None:
     failures = run.failures
     errors = run.errors
+    summary = run.summary
 
     if errors:
         console.print(f"[yellow]{len(errors)} test(s) could not run — those boundaries were not tested.[/yellow]")
+
+    # An under-scoped run that reports no leaks is the failure mode this tool
+    # exists to prevent, so it is never allowed to look like a pass.
+    if summary and not summary.contract_matched:
+        console.print()
+        console.print(
+            "[red]INCOMPLETE — the response did not match the configured connector contract.[/red]"
+        )
+        for item in summary.scope_not_tested:
+            if "never resolved" in item or "not configured" in item:
+                console.print(f"  [yellow]•[/yellow] {item}")
+        console.print(
+            "Those surfaces were scanned as an empty string, so their tests passed without "
+            "testing anything. Fix the dotted paths in your config (or set them to null to "
+            "record them as out of scope) and re-run. This run is not usable as evidence."
+        )
+        raise typer.Exit(EXIT_OPERATIONAL)
+
+    if summary and not summary.ingest_verified:
+        console.print(
+            "[yellow]Warning: verify-ingest has not passed for these fixtures against this "
+            "endpoint.[/yellow] The canaries may not exist in the index, in which case these "
+            "results are meaningless. Run `aitenant verify-ingest` first."
+        )
 
     if not failures:
         if errors:
             console.print("[yellow]No leaks detected, but the run was incomplete.[/yellow]")
             raise typer.Exit(EXIT_OPERATIONAL)
-        console.print(f"[green]PASS[/green] — {len(run.results)} tests, no cross-tenant leakage observed.")
+        console.print(
+            f"[green]PASS[/green] — {len(run.results)} tests, no cross-tenant leakage observed "
+            "on the surfaces listed under Scope exercised."
+        )
         raise typer.Exit(EXIT_OK)
 
     gating = [r for r in failures if r.severity and r.severity.rank >= fail_on.rank]

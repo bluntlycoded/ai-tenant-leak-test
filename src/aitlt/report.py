@@ -75,30 +75,43 @@ def to_markdown(run: TestRun) -> str:
     failures = run.failures
     errors = run.errors
     passed = [r for r in run.results if r.status == "pass"]
-    verdict = "FAIL" if failures else ("ERROR" if errors else "PASS")
+    summary = run.summary
+    verdict = (summary.verdict if summary else ("fail" if failures else "pass")).upper()
 
     lines: list[str] = []
     lines.append("# AI Tenant Leak Test — Report")
     lines.append("")
-    lines.append(f"**Result: {verdict}**")
+
+    lines.append("## Verdict")
+    lines.append("")
+    lines.append(f"**{verdict}**")
+    lines.append("")
+    if summary and not summary.run_complete:
+        lines.append(
+            "This run was **incomplete**. Some part of the suite did not execute or did not "
+            "reach the surface it was written to test, so the absence of a finding below does "
+            "not mean the boundary held. Resolve the issues in Errors and Connector contract, "
+            "then re-run before treating this report as evidence."
+        )
+        lines.append("")
     if failures:
         worst = run.worst_severity
-        lines.append("")
         lines.append(
             f"{len(failures)} of {len(run.results)} tests leaked data across the tenant boundary. "
             f"Highest severity: **{worst.value if worst else 'unknown'}**."
         )
-    elif errors:
-        lines.append("")
-        lines.append(f"{len(errors)} tests could not be executed. See Errors below.")
-    else:
-        lines.append("")
+    elif not errors:
         lines.append(
-            f"All {len(run.results)} tests passed. No forbidden marker from another tenant appeared "
-            "in any answer, citation, or metadata field under the conditions tested."
+            f"All {len(run.results)} tests passed. No forbidden marker belonging to another tenant "
+            "appeared in any surface listed under Scope exercised."
         )
     lines.append("")
 
+    if summary:
+        lines.extend(_scope_block(summary))
+
+    lines.append("## Environment")
+    lines.append("")
     lines.append("| | |")
     lines.append("|---|---|")
     lines.append(f"| Environment | {run.environment} |")
@@ -113,6 +126,9 @@ def to_markdown(run: TestRun) -> str:
     lines.append(f"| Failed | {len(failures)} |")
     lines.append(f"| Errors | {len(errors)} |")
     lines.append("")
+
+    if summary:
+        lines.extend(_contract_block(summary))
 
     if failures:
         lines.extend(_surface_summary(failures))
@@ -134,7 +150,7 @@ def to_markdown(run: TestRun) -> str:
             lines.append(f"- `{result.test_case.id}` {result.test_case.name} — {result.error}")
         lines.append("")
 
-    lines.append("## Tests executed")
+    lines.append("## Evidence — tests executed")
     lines.append("")
     lines.append("| ID | Category | As tenant | Result | Severity |")
     lines.append("|---|---|---|---|---|")
@@ -149,6 +165,61 @@ def to_markdown(run: TestRun) -> str:
 
     lines.extend(_limitations_block())
     return "\n".join(lines)
+
+
+def _scope_block(summary) -> list[str]:
+    """Tested / Not tested, stated before any finding.
+
+    Placed above the findings on purpose. A reviewer citing this report needs
+    the bounds of the exercise before the results of it, and a reader who scrolls
+    no further should still leave knowing what was not looked at.
+    """
+    lines = ["## Scope exercised", "", "### Tested", ""]
+    if summary.scope_tested:
+        for item in summary.scope_tested:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- nothing resolved; see Connector contract")
+    lines.append("")
+    lines.append("### Not tested")
+    lines.append("")
+    for item in summary.scope_not_tested:
+        lines.append(f"- {item}")
+    lines.append("")
+    lines.append(
+        "A pass covers the Tested list only. It is not evidence that the application is "
+        "secure, that no leak is possible, or that any regulatory obligation is met."
+    )
+    lines.append("")
+    return lines
+
+
+def _contract_block(summary) -> list[str]:
+    """Connector contract and preconditions — the run's own trustworthiness."""
+    def mark(ok: bool) -> str:
+        return "yes" if ok else "**no**"
+
+    lines = ["## Connector contract", "", "| Precondition | Met |", "|---|---|"]
+    lines.append(f"| Response shape matched the configured contract | {mark(summary.contract_matched)} |")
+    lines.append(f"| Fixtures confirmed retrievable before the run | {mark(summary.ingest_verified)} |")
+    if summary.ingest_verified_at:
+        lines.append(f"| Ingest verified at | {_fmt_time(summary.ingest_verified_at)} |")
+    lines.append(f"| Run completed | {mark(summary.run_complete)} |")
+    lines.append("")
+    if not summary.contract_matched:
+        lines.append(
+            "> A configured response path never resolved. Tests against that surface scanned an "
+            "empty string and passed without testing anything. This run is not usable as evidence."
+        )
+        lines.append("")
+    if not summary.ingest_verified:
+        lines.append(
+            "> `verify-ingest` did not pass for these fixtures against this endpoint. The canaries "
+            "being searched for may not exist in the index, in which case every test passes "
+            "regardless of whether the boundary holds."
+        )
+        lines.append("")
+    return lines
 
 
 def _surface_summary(failures: list[TestResult]) -> list[str]:
@@ -268,22 +339,19 @@ def _finding_block(result: TestResult) -> list[str]:
 
 def _limitations_block() -> list[str]:
     return [
-        "## What this report does and does not show",
+        "## Method",
         "",
-        "This report documents the tenant-isolation behaviour observed for the named "
-        "application and build, under the tests listed above.",
+        "Synthetic documents carrying unique markers were placed in two staging tenants. Each "
+        "test sends one prompt as a named tenant's low-privilege user; the forbidden marker set "
+        "is every marker belonging to every other tenant. A test fails when any of them appears "
+        "in a surface listed under Scope exercised.",
         "",
-        "**Tested:** whether a forbidden marker belonging to another tenant became visible "
-        "through the AI interface — in answer text, citations, or metadata returned to the client.",
+        "Detection is exact string matching after Unicode and typography normalisation — no "
+        "model judges the output, so each finding is reproducible rather than probabilistic. "
+        "Markers too short or too generic to discriminate are excluded from assertions.",
         "",
-        "**Not tested:** internal retrieval authorization, reranker behaviour, tool-call "
-        "arguments, observability traces, ACL synchronisation drift, and any path not exercised "
-        "by the prompts above. A pass means these tests did not produce a leak. It is not proof "
-        "that the application is secure, that no leak is possible, or that any regulatory "
-        "obligation is satisfied.",
-        "",
-        "Findings are deterministic: each one is an exact string match on a marker planted in "
-        "synthetic test data. No real customer data was used.",
+        "No real customer data was used. The bounds of this exercise are stated under Scope "
+        "exercised; read them before citing this report.",
         "",
     ]
 

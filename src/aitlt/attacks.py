@@ -9,6 +9,7 @@ from typing import Callable
 
 import yaml
 
+from . import stamp
 from .config import Config
 from .connector import Connector, ConnectorError
 from .detector import scan
@@ -76,14 +77,33 @@ def run_suite(
         endpoint=config.endpoint.url,
     )
 
+    # Union across the whole run: a field may legitimately be absent from one
+    # response and present in another, so one miss is not a contract failure.
+    surfaces_resolved = {"answer": False, "citations": False, "metadata": False}
+
     with Connector(config) as connector:
         for case in cases:
             result = _run_case(connector, fixtures, case)
+            for key, present in result.observation.schema_found.items():
+                surfaces_resolved[key] = surfaces_resolved.get(key, False) or present
             run.results.append(result)
             if on_result:
                 on_result(result)
 
     run.finished_at = datetime.now(timezone.utc)
+
+    ep = config.endpoint
+    verified, verified_at, _ = stamp.read(config.fixtures_path, ep.url)
+    run.summary = run.build_summary(
+        surfaces_resolved=surfaces_resolved,
+        surfaces_configured={
+            "answer": ep.response_text_field,
+            "citations": ep.citations_field,
+            "metadata": ep.metadata_field,
+        },
+        ingest_verified=verified,
+        ingest_verified_at=verified_at,
+    )
     return run
 
 

@@ -190,7 +190,47 @@ class TestResult(BaseModel):
         return max((m.severity for m in self.matches), key=lambda s: s.rank)
 
 
+#: Boundaries V1 structurally cannot exercise from the client side. Stated in
+#: every report and every JSON result so a reader never has to infer coverage
+#: from the absence of a finding.
+SCOPE_NOT_TESTED = [
+    "internal retrieval authorization (pre- vs post-filter ordering)",
+    "reranker behaviour and hybrid-search vector legs",
+    "tool-call arguments and agent action permissions",
+    "observability traces and log pipelines",
+    "ACL synchronisation drift from source systems",
+    "embedding and KV cache internals beyond observable response reuse",
+]
+
+
+class RunSummary(BaseModel):
+    """Machine-readable verdict, first key in the JSON result.
+
+    Exists so a GitHub check, a Slack hook, or a procurement reviewer can read
+    the outcome and its bounds without parsing findings. `run_complete` and
+    `contract_matched` matter as much as the verdict: an under-scoped run that
+    reports no leaks is the failure mode this product exists to avoid.
+    """
+
+    verdict: Literal["pass", "fail", "incomplete"]
+    run_complete: bool
+    contract_matched: bool
+    ingest_verified: bool
+    ingest_verified_at: datetime | None = None
+    tests_run: int = 0
+    tests_passed: int = 0
+    tests_failed: int = 0
+    tests_errored: int = 0
+    critical_findings: int = 0
+    high_findings: int = 0
+    medium_findings: int = 0
+    scope_tested: list[str] = Field(default_factory=list)
+    scope_not_tested: list[str] = Field(default_factory=lambda: list(SCOPE_NOT_TESTED))
+
+
 class TestRun(BaseModel):
+    #: First field so it serialises to the top of the JSON.
+    summary: RunSummary | None = None
     run_id: str
     environment: str
     build_id: str | None = None
@@ -212,3 +252,71 @@ class TestRun(BaseModel):
     def worst_severity(self) -> Severity | None:
         sevs = [r.severity for r in self.failures if r.severity]
         return max(sevs, key=lambda s: s.rank) if sevs else None
+
+    def build_summary(
+        self,
+        *,
+        surfaces_resolved: dict[str, bool],
+        surfaces_configured: dict[str, str | None],
+        ingest_verified: bool,
+        ingest_verified_at: datetime | None,
+    ) -> RunSummary:
+        """Derive the summary from what actually happened, never from intent."""
+        counts = {Severity.CRITICAL: 0, Severity.HIGH: 0, Severity.MEDIUM: 0}
+        for result in self.failures:
+            for match in result.matches:
+                counts[match.severity] += 1
+
+        # A configured path that never resolved means that surface was scanned
+        # as an empty string — its tests passed without testing anything.
+        unresolved = [
+            surface
+            for surface, path in surfaces_configured.items()
+            if path is not None and not surfaces_resolved.get(surface, False)
+        ]
+        contract_matched = not unresolved
+
+        tested: list[str] = []
+        label = {
+            "answer": "assistant answer text",
+            "citations": "citations and source identifiers",
+            "metadata": "client-visible document metadata",
+        }
+        for surface, path in surfaces_configured.items():
+            if path is not None and surfaces_resolved.get(surface, False):
+                tested.append(label.get(surface, surface))
+        categories = sorted({r.test_case.category for r in self.results})
+        if categories:
+            tested.append("attack categories: " + ", ".join(categories))
+
+        not_tested = list(SCOPE_NOT_TESTED)
+        for surface, path in surfaces_configured.items():
+            if path is None:
+                not_tested.insert(0, f"{label.get(surface, surface)} (not configured)")
+            elif surface in unresolved:
+                not_tested.insert(0, f"{label.get(surface, surface)} (configured as `{path}` but never resolved)")
+
+        run_complete = not self.errors and contract_matched
+        if not run_complete:
+            verdict: Literal["pass", "fail", "incomplete"] = "incomplete"
+        elif self.failures:
+            verdict = "fail"
+        else:
+            verdict = "pass"
+
+        return RunSummary(
+            verdict=verdict,
+            run_complete=run_complete,
+            contract_matched=contract_matched,
+            ingest_verified=ingest_verified,
+            ingest_verified_at=ingest_verified_at,
+            tests_run=len(self.results),
+            tests_passed=len([r for r in self.results if r.status == "pass"]),
+            tests_failed=len(self.failures),
+            tests_errored=len(self.errors),
+            critical_findings=counts[Severity.CRITICAL],
+            high_findings=counts[Severity.HIGH],
+            medium_findings=counts[Severity.MEDIUM],
+            scope_tested=tested,
+            scope_not_tested=not_tested,
+        )

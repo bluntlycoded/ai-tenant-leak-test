@@ -24,3 +24,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The domain models are named TestCase/TestResult/TestRun. Tests here are all
+# functions, so stop pytest trying to collect those classes.
+python_classes = "_NeverMatches"

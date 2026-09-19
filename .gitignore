@@ -21,3 +21,5 @@ output/
 # and a link back to whose staging system was tested.
 fixtures/fixtures.json
 fixtures/corpus/
+# The ingest stamp records the customer's staging endpoint.
+fixtures/.ingest-verified.json
