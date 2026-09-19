@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Reports contain customer responses — never commit them.
+output/
+*.report.json
+*.report.md
+
+# Config may carry tokens.
+aitenant.yaml
+.env
+
+# Fixtures are regenerated per engagement. Canaries are unique to a customer
+# and must never be public — a committed canary is both a hint to an attacker
+# and a link back to whose staging system was tested.
+fixtures/fixtures.json
+fixtures/corpus/

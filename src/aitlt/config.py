@@ -1,0 +1,150 @@
+"""Config loading.
+
+Kept deliberately dumb: a YAML file describing how to talk to one chat endpoint,
+plus per-tenant auth pulled from the environment. Tokens never live in the file.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from pathlib import Path
+from typing import Any
+
+import yaml
+from pydantic import BaseModel, Field
+
+_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+class ConfigError(Exception):
+    pass
+
+
+def _expand(value: Any) -> Any:
+    """Replace ${VAR} with the environment value, recursively."""
+    if isinstance(value, str):
+
+        def sub(m: re.Match[str]) -> str:
+            name = m.group(1)
+            got = os.environ.get(name)
+            if got is None:
+                raise ConfigError(f"config references ${{{name}}} but that environment variable is not set")
+            return got
+
+        return _ENV_REF.sub(sub, value)
+    if isinstance(value, dict):
+        return {k: _expand(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand(v) for v in value]
+    return value
+
+
+class TenantAuth(BaseModel):
+    """How to authenticate as one tenant's low-privilege test user."""
+
+    #: Header name/value pairs merged into the request for this tenant.
+    headers: dict[str, str] = Field(default_factory=dict)
+    #: Extra body fields merged into the request for this tenant (for APIs that
+    #: take the tenant in the payload rather than a header).
+    body: dict[str, Any] = Field(default_factory=dict)
+
+
+class EndpointConfig(BaseModel):
+    url: str
+    method: str = "POST"
+    headers: dict[str, str] = Field(default_factory=dict)
+    #: Body field the prompt goes into. Dotted paths allowed: "input.message".
+    prompt_field: str = "message"
+    #: Static body fields sent with every request.
+    body: dict[str, Any] = Field(default_factory=dict)
+    #: Dotted read paths into the JSON response.
+    response_text_field: str = "answer"
+    citations_field: str | None = "citations"
+    metadata_field: str | None = "metadata"
+    timeout_seconds: float = 60.0
+
+
+class ReportConfig(BaseModel):
+    formats: list[str] = Field(default_factory=lambda: ["markdown", "json"])
+    directory: str = "output"
+
+
+class Config(BaseModel):
+    endpoint: EndpointConfig
+    tenants: dict[str, TenantAuth]
+    report: ReportConfig = Field(default_factory=ReportConfig)
+    environment: str = "staging"
+    build_id: str | None = None
+    #: Where fixture JSON lives.
+    fixtures_path: str = "fixtures/fixtures.json"
+
+    @classmethod
+    def load(cls, path: str | Path) -> "Config":
+        p = Path(path)
+        if not p.exists():
+            raise ConfigError(f"no config at {p}. Run `aitenant init` first.")
+        raw = yaml.safe_load(p.read_text()) or {}
+        return cls.model_validate(_expand(raw))
+
+
+def dig(data: Any, dotted: str | None) -> Any:
+    """Read a dotted path out of nested dicts/lists. Returns None if absent."""
+    if not dotted:
+        return None
+    cur = data
+    for part in dotted.split("."):
+        if isinstance(cur, dict):
+            cur = cur.get(part)
+        elif isinstance(cur, list) and part.isdigit():
+            idx = int(part)
+            cur = cur[idx] if idx < len(cur) else None
+        else:
+            return None
+        if cur is None:
+            return None
+    return cur
+
+
+def bury(data: dict[str, Any], dotted: str, value: Any) -> None:
+    """Write a value into a nested dict, creating intermediate dicts."""
+    parts = dotted.split(".")
+    cur = data
+    for part in parts[:-1]:
+        cur = cur.setdefault(part, {})
+    cur[parts[-1]] = value
+
+
+DEFAULT_CONFIG = """\
+# AI Tenant Leak Test configuration.
+# Tokens are read from the environment — never commit them here.
+
+environment: staging
+build_id: null
+
+endpoint:
+  url: http://127.0.0.1:8000/ai/chat
+  method: POST
+  prompt_field: message
+  response_text_field: answer
+  citations_field: citations
+  metadata_field: metadata
+  headers:
+    Content-Type: application/json
+
+# One low-privilege test user per tenant. Whatever identifies the caller's
+# tenant to your API goes here.
+tenants:
+  tenant_a:
+    headers:
+      Authorization: Bearer ${TENANT_A_TOKEN}
+  tenant_b:
+    headers:
+      Authorization: Bearer ${TENANT_B_TOKEN}
+
+report:
+  formats: [markdown, json]
+  directory: output
+
+fixtures_path: fixtures/fixtures.json
+"""
