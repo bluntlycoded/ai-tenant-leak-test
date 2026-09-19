@@ -168,6 +168,12 @@ class Observation(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     http_status: int | None = None
     raw: dict[str, Any] | None = None
+    #: Which configured response paths actually resolved. A misconfigured
+    #: citations_field silently scans nothing and every citation test passes
+    #: vacuously — the same class of false-clean as fixtures never landing.
+    schema_found: dict[str, bool] = Field(default_factory=dict)
+    #: Transport-level retries spent on this request.
+    attempts: int = 1
 
 
 class TestResult(BaseModel):

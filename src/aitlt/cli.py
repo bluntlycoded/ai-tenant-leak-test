@@ -130,6 +130,10 @@ def verify_ingest(config_path: str = typer.Option(CONFIG_PATH, "--config", "-c")
 
     table = Table("Tenant", "Document", "Own canary retrievable")
     all_ok = True
+    # Union across every probe: a field may legitimately be absent from one
+    # response and present in another.
+    surfaces_seen = {"answer": False, "citations": False, "metadata": False}
+
     with Connector(config) as connector:
         for tenant in fs.tenants:
             for doc in tenant.documents:
@@ -140,22 +144,62 @@ def verify_ingest(config_path: str = typer.Option(CONFIG_PATH, "--config", "-c")
                     table.add_row(tenant.tenant_id, doc.title, f"[red]error: {exc}[/red]")
                     all_ok = False
                     continue
+                for key, present in obs.schema_found.items():
+                    surfaces_seen[key] = surfaces_seen.get(key, False) or present
                 haystack = f"{obs.answer} {obs.citations} {obs.metadata}".casefold()
                 found = any(c.casefold() in haystack for c in doc.canaries)
                 table.add_row(tenant.tenant_id, doc.title, "[green]yes[/green]" if found else "[red]no[/red]")
                 all_ok = all_ok and found
 
     console.print(table)
-    if all_ok:
-        console.print("[green]All fixtures are retrievable by their owning tenant.[/green] The suite will test real paths.")
+    console.print()
+
+    ep = config.endpoint
+    schema = Table("Surface", "Configured path", "Seen in responses", "Consequence if missing")
+    configured = {
+        "answer": ep.response_text_field,
+        "citations": ep.citations_field,
+        "metadata": ep.metadata_field,
+    }
+    consequences = {
+        "answer": "nothing is tested at all",
+        "citations": "cl-01, cl-02 pass vacuously",
+        "metadata": "ml-01, ml-02 pass vacuously",
+    }
+    schema_ok = True
+    for surface, path in configured.items():
+        if path is None:
+            schema.add_row(surface, "[dim]not configured[/dim]", "[dim]n/a[/dim]", "[dim]surface intentionally skipped[/dim]")
+            continue
+        seen = surfaces_seen.get(surface, False)
+        schema.add_row(
+            surface,
+            f"`{path}`",
+            "[green]yes[/green]" if seen else "[red]no[/red]",
+            "" if seen else f"[yellow]{consequences[surface]}[/yellow]",
+        )
+        schema_ok = schema_ok and seen
+    console.print(schema)
+
+    if all_ok and schema_ok:
+        console.print()
+        console.print("[green]Fixtures are retrievable and every configured surface resolved.[/green] The suite will test real paths.")
         raise typer.Exit(EXIT_OK)
 
     console.print()
-    console.print(
-        "[red]Some fixtures are not retrievable by their own tenant.[/red] "
-        "Until this passes, a clean leak report proves nothing — the documents may simply "
-        "not be in the index. Check ingestion and reindexing, then re-run."
-    )
+    if not all_ok:
+        console.print(
+            "[red]Some fixtures are not retrievable by their own tenant.[/red] "
+            "Until this passes, a clean leak report proves nothing — the documents may "
+            "simply not be in the index. Check ingestion and reindexing."
+        )
+    if not schema_ok:
+        console.print(
+            "[red]A configured response path never resolved.[/red] "
+            "Tests against that surface would scan an empty string and pass without "
+            "testing anything. Fix the dotted path in your config, or set it to null "
+            "to record that the surface is intentionally out of scope."
+        )
     raise typer.Exit(EXIT_OPERATIONAL)
 
 

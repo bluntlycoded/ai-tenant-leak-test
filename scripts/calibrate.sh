@@ -10,8 +10,8 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-PY=".venv/bin/python"
-AITENANT=".venv/bin/aitenant"
+PY="${PY:-.venv/bin/python}"
+AITENANT="${AITENANT:-.venv/bin/aitenant}"
 PORT="${PORT:-8000}"
 
 export TENANT_A_TOKEN=tenant-a-token

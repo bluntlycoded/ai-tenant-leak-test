@@ -7,6 +7,7 @@ whatever JSON shape comes back.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import httpx
@@ -46,10 +47,7 @@ class Connector:
         body: dict[str, Any] = {**ep.body, **auth.body}
         bury(body, ep.prompt_field, prompt)
 
-        try:
-            response = self._client.request(ep.method, ep.url, headers=headers, json=body)
-        except httpx.HTTPError as exc:
-            raise ConnectorError(f"request to {ep.url} failed: {exc}") from exc
+        response, attempts = self._send(ep, headers, body)
 
         try:
             payload = response.json()
@@ -60,6 +58,8 @@ class Connector:
                 answer=response.text,
                 http_status=response.status_code,
                 raw=None,
+                schema_found={"answer": bool(response.text), "citations": False, "metadata": False},
+                attempts=attempts,
             )
 
         answer = dig(payload, ep.response_text_field)
@@ -75,7 +75,41 @@ class Connector:
             metadata=metadata if isinstance(metadata, dict) else ({} if metadata is None else {"value": metadata}),
             http_status=response.status_code,
             raw=payload if isinstance(payload, dict) else {"value": payload},
+            schema_found={
+                "answer": answer is not None,
+                # Only meaningful when the path is configured at all.
+                "citations": citations is not None if ep.citations_field else False,
+                "metadata": metadata is not None if ep.metadata_field else False,
+            },
+            attempts=attempts,
         )
+
+    def _send(self, ep, headers: dict[str, str], body: dict[str, Any]) -> tuple[httpx.Response, int]:
+        """Send with bounded retries on transport errors and 5xx.
+
+        Staging endpoints are flaky, and a transient 502 that turns into an
+        "error" result reports a boundary as untested when it is probably fine.
+        Only transport failures and server errors are retried — a successful
+        response is never re-sent, which keeps the cache tests honest.
+        """
+        last_error: Exception | None = None
+        attempts = ep.max_retries + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                response = self._client.request(ep.method, ep.url, headers=headers, json=body)
+            except httpx.HTTPError as exc:
+                last_error = exc
+            else:
+                if response.status_code < 500 or attempt == attempts:
+                    return response, attempt
+                last_error = ConnectorError(f"HTTP {response.status_code}")
+
+            if attempt < attempts:
+                time.sleep(ep.retry_backoff_seconds * attempt)
+
+        raise ConnectorError(
+            f"request to {ep.url} failed after {attempts} attempt(s): {last_error}"
+        ) from last_error
 
 
 def _as_list(value: Any) -> list[str]:

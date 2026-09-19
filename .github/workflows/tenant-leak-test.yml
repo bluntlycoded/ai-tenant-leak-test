@@ -1,0 +1,91 @@
+# TEMPLATE — copy this into the repository of the application under test.
+#
+# It is workflow_dispatch-only here so it never runs against this repo, which
+# has no staging endpoint. In the target app's repo, add the triggers you want.
+#
+# The recurring trigger that matters is a change to the AI data path — a new
+# corpus, vector store, retriever, reranker, model, system prompt, agent tool,
+# role, or cache. Running on every commit to unrelated code mostly burns minutes.
+#
+# Required secrets in the target repo:
+#   AITLT_FIXTURES_JSON   base64 of fixtures/fixtures.json from the seeding run
+#   TENANT_A_TOKEN        low-privilege test user in staging tenant A
+#   TENANT_B_TOKEN        low-privilege test user in staging tenant B
+#
+# Canaries must be the *same ones* that were ingested into staging, which is why
+# the fixtures travel as a secret rather than being regenerated here. Regenerating
+# them in CI would produce markers that exist nowhere in the index, and every
+# test would pass while testing nothing.
+
+name: AI tenant leak test
+
+on:
+  workflow_dispatch:
+    inputs:
+      fail_on:
+        description: "Minimum severity that fails the build"
+        type: choice
+        options: [critical, high, medium]
+        default: medium
+
+  # Uncomment in the target repo:
+  # push:
+  #   paths:
+  #     - "services/rag/**"
+  #     - "prompts/**"
+  #     - "config/retrieval/**"
+  # schedule:
+  #   - cron: "0 3 * * 1"
+
+jobs:
+  leak-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install git+https://github.com/bluntlycoded/ai-tenant-leak-test@main
+
+      - name: Restore the fixtures that were ingested into staging
+        env:
+          FIXTURES_B64: ${{ secrets.AITLT_FIXTURES_JSON }}
+        run: |
+          if [ -z "$FIXTURES_B64" ]; then
+            echo "::error::AITLT_FIXTURES_JSON is not set. Seed staging first, then store fixtures/fixtures.json as a base64 secret."
+            exit 1
+          fi
+          mkdir -p fixtures
+          echo "$FIXTURES_B64" | base64 -d > fixtures/fixtures.json
+
+      - name: Confirm fixtures are still retrievable and the schema resolves
+        # Without this, a green run may only mean the documents were reindexed
+        # away or the response shape changed. Either way the report would be a
+        # false clean.
+        env:
+          TENANT_A_TOKEN: ${{ secrets.TENANT_A_TOKEN }}
+          TENANT_B_TOKEN: ${{ secrets.TENANT_B_TOKEN }}
+        run: aitenant verify-ingest --config aitenant.yaml
+
+      - name: Run the leak suite
+        env:
+          TENANT_A_TOKEN: ${{ secrets.TENANT_A_TOKEN }}
+          TENANT_B_TOKEN: ${{ secrets.TENANT_B_TOKEN }}
+        run: |
+          aitenant test \
+            --config aitenant.yaml \
+            --suite quick-leak-check \
+            --environment staging \
+            --build "${GITHUB_SHA::7}" \
+            --fail-on "${{ inputs.fail_on || 'medium' }}"
+
+      - name: Upload the evidence pack
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tenant-leak-report
+          path: output/
+          retention-days: 90

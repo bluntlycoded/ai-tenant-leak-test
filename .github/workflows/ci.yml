@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  package:
+    # Proves the distribution actually installs and exposes the `aitenant`
+    # entrypoint from a clean environment — not just `pip install -e .` on a
+    # machine that already has the source tree on its path.
+    name: Package installs cleanly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build wheel and sdist
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Install the built wheel into a clean venv
+        run: |
+          python -m venv /tmp/clean
+          /tmp/clean/bin/pip install --upgrade pip
+          /tmp/clean/bin/pip install dist/*.whl
+
+      - name: Entrypoint works outside the source tree
+        run: |
+          mkdir -p /tmp/elsewhere && cd /tmp/elsewhere
+          /tmp/clean/bin/aitenant --help
+          /tmp/clean/bin/aitenant init
+          test -f aitenant.yaml
+          test -f fixtures/fixtures.json
+          test -d fixtures/corpus/tenant_a
+          echo "packaging OK"
+
+  test:
+    name: Unit tests and calibration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install with dev target
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[devtarget]" pytest
+
+      - name: Unit tests
+        run: python -m pytest tests/ -q
+
+      - name: Generate fixtures
+        run: aitenant init
+
+      - name: Calibrate the detector against the vulnerable target
+        # The suite must go green on a correctly scoped target and red on each
+        # individual leak path. A negative suite that has never produced a
+        # positive cannot be trusted.
+        env:
+          PY: python
+          AITENANT: aitenant
+        run: ./scripts/calibrate.sh

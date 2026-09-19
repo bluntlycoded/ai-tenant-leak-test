@@ -32,6 +32,73 @@ aitenant test --suite quick-leak-check --build 1.4.2 --fail-on critical
 
 Exit codes: `0` passed, `1` operational error (nothing was proven), `2` a leak at or above `--fail-on`.
 
+## What the report looks like
+
+The report is the product. [`examples/sample-failing-report.md`](examples/sample-failing-report.md) is a real one, generated against the vulnerable dev target — retrieval correctly scoped, response cache not:
+
+```
+**Result: FAIL**
+
+2 of 23 tests leaked data across the tenant boundary. Highest severity: critical.
+
+| Surface   | Marker kind | Severity | Tests affected |
+|-----------|-------------|----------|----------------|
+| answer    | canary      | critical | 2              |
+| citations | source_id   | high     | 2              |
+| metadata  | filename    | medium   | 2              |
+```
+
+Each finding carries the literal prompt, the identity that sent it, the exact marker that leaked, where it appeared, numbered reproduction steps, and the full response. Twenty-one of twenty-three tests passed — the two that failed are the cache probes, which is the shape most real findings take. The primary retriever is usually filtered correctly; the leak is on a secondary path.
+
+## The supported target shape
+
+V1 supports exactly one target shape. This is a deliberate constraint: every additional shape is a connector to maintain and a pilot that turns into custom consulting.
+
+| | |
+|---|---|
+| Transport | one JSON-over-HTTP endpoint |
+| Method | `POST` (configurable) |
+| Prompt | one request-body field, dotted paths supported (`input.message`) |
+| Tenant identity | per-tenant headers or body fields — bearer token, API key, or `workspace_id` in the payload |
+| Answer | one dotted read path, **required** |
+| Citations | one dotted read path, optional — set `null` if the API returns none |
+| Metadata | one dotted read path, optional — set `null` if the API returns none |
+| Timeout | per request, default 60s |
+| Retries | transport errors and 5xx only, default 2, exponential backoff. A successful response is never re-sent, so cache tests stay meaningful |
+
+[`examples/aitenant.yaml`](examples/aitenant.yaml) documents every field. Tokens are never written to the config — it holds `${VAR}` references resolved from the environment at run time.
+
+**Setting a read path to a field that does not exist is the same failure as fixtures never landing.** That surface gets scanned as an empty string and its tests pass while testing nothing. `verify-ingest` checks every configured path against real responses and fails the run if one never resolves, naming the tests that would have lied:
+
+```
+| Surface   | Configured path | Seen in responses | Consequence if missing   |
+| answer    | `answer`        | yes               |                          |
+| citations | `data.sources`  | no                | cl-01, cl-02 pass vacuously |
+| metadata  | `metadata`      | yes               |                          |
+```
+
+## Run in GitHub Actions
+
+Copy [`.github/workflows/tenant-leak-test.yml`](.github/workflows/tenant-leak-test.yml) into the repository of the application under test. The CLI's exit codes do the gating: `2` fails the build, `1` means the run was incomplete and proved nothing.
+
+Three secrets are required in the target repo:
+
+| Secret | What it is |
+|---|---|
+| `AITLT_FIXTURES_JSON` | base64 of `fixtures/fixtures.json` from the seeding run |
+| `TENANT_A_TOKEN` | low-privilege test user in staging tenant A |
+| `TENANT_B_TOKEN` | low-privilege test user in staging tenant B |
+
+```bash
+base64 -i fixtures/fixtures.json | pbcopy   # paste into the secret
+```
+
+The fixtures travel as a secret rather than being regenerated in CI, because the canaries must be the *same ones* that were ingested into staging. Regenerating them would produce markers that exist nowhere in the index, and every test would pass while testing nothing.
+
+The workflow runs `verify-ingest` before the suite for the same reason, then uploads the report as a build artifact.
+
+**Pick the trigger deliberately.** The useful one is a change to the AI data path — a new corpus, vector store, retriever, reranker, model, system prompt, agent tool, role, or cache. Running on every commit to unrelated code mostly burns minutes.
+
 ## The suite
 
 23 tests in `suites/quick-leak-check.yaml`, across seven groups: direct cross-tenant retrieval, semantic adjacency, direct prompt injection, indirect injection via a planted document, citation leakage, metadata leakage, and cache reuse. The last two groups run in both directions, because isolation is not always symmetric.
@@ -86,6 +153,9 @@ One unscoped code path usually fails most of the suite at once. The report's **L
 ```bash
 .venv/bin/python -m pytest tests/ -q   # detector unit tests
 ./scripts/calibrate.sh                 # end-to-end calibration
+./scripts/smoke.sh                     # wheel installs and runs outside the source tree
 ```
+
+All three run in CI on every push ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
 Reports land in `output/` and are gitignored — they contain customer responses.

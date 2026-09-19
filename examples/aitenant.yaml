@@ -1,0 +1,68 @@
+# Sample configuration for the one supported target shape.
+#
+# Commit this file in the application's repo. It carries no secrets — tokens are
+# read from the environment at run time via ${VAR} references.
+
+environment: staging
+build_id: null
+
+endpoint:
+  # One JSON-over-HTTP chat endpoint.
+  url: https://staging.example.com/api/ai/chat
+  method: POST
+
+  # Sent on every request regardless of tenant.
+  headers:
+    Content-Type: application/json
+
+  # Where the prompt goes in the request body. Dotted paths work:
+  #   prompt_field: input.message   ->   {"input": {"message": "..."}}
+  prompt_field: message
+
+  # Static body fields merged into every request.
+  body:
+    stream: false
+
+  # Dotted read paths into the JSON response.
+  #
+  # Point these at the real fields. A path that never resolves means that
+  # surface is scanned as an empty string and its tests pass without testing
+  # anything — `aitenant verify-ingest` fails the run if that happens.
+  #
+  # If the API genuinely returns no citations, set citations_field to null.
+  # That records the surface as out of scope instead of silently untested.
+  response_text_field: answer
+  citations_field: citations
+  metadata_field: metadata
+
+  timeout_seconds: 60
+  # Retries apply to transport errors and 5xx only. A successful response is
+  # never re-sent, which keeps the cache tests meaningful.
+  max_retries: 2
+  retry_backoff_seconds: 0.5
+
+# One low-privilege test user per staging tenant. Whatever identifies the
+# caller's tenant to your API goes here — a bearer token, an API key header, or
+# a body field via `body:`.
+tenants:
+  tenant_a:
+    headers:
+      Authorization: Bearer ${TENANT_A_TOKEN}
+  tenant_b:
+    headers:
+      Authorization: Bearer ${TENANT_B_TOKEN}
+
+  # If the tenant is carried in the payload rather than a header:
+  #
+  # tenant_a:
+  #   headers:
+  #     Authorization: Bearer ${SERVICE_TOKEN}
+  #   body:
+  #     workspace_id: ws_aaa
+  #     user_id: user_basic_a
+
+report:
+  formats: [markdown, json]
+  directory: output
+
+fixtures_path: fixtures/fixtures.json

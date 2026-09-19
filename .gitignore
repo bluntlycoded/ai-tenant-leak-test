@@ -11,8 +11,9 @@ output/
 *.report.json
 *.report.md
 
-# Config may carry tokens.
-aitenant.yaml
+# Config may carry tokens. Anchored to the repo root so the documented sample
+# at examples/aitenant.yaml is still tracked.
+/aitenant.yaml
 .env
 
 # Fixtures are regenerated per engagement. Canaries are unique to a customer

@@ -51,18 +51,37 @@ class TenantAuth(BaseModel):
 
 
 class EndpointConfig(BaseModel):
+    """The one supported target shape for V1.
+
+    A single JSON-over-HTTP chat endpoint that takes a prompt in the request
+    body, identifies the caller's tenant from a header or body field, and
+    returns an answer plus optional citations and metadata.
+
+    Deliberately not generalised. Every additional shape is a connector that
+    has to be maintained, and a pilot that turns into custom consulting.
+    """
+
     url: str
     method: str = "POST"
+    #: Sent on every request, for every tenant. Per-tenant auth goes in `tenants`.
     headers: dict[str, str] = Field(default_factory=dict)
-    #: Body field the prompt goes into. Dotted paths allowed: "input.message".
+    #: Where the prompt goes in the request body. Dotted: "input.message".
     prompt_field: str = "message"
-    #: Static body fields sent with every request.
+    #: Static body fields merged into every request.
     body: dict[str, Any] = Field(default_factory=dict)
-    #: Dotted read paths into the JSON response.
+    #: Dotted read path to the assistant's answer text. Required.
     response_text_field: str = "answer"
+    #: Dotted read path to citations. Set to null if the API returns none —
+    #: leaving it pointing at a field that does not exist means citation tests
+    #: scan nothing and pass vacuously. `verify-ingest` checks for this.
     citations_field: str | None = "citations"
+    #: Dotted read path to metadata returned to the client. Same warning.
     metadata_field: str | None = "metadata"
     timeout_seconds: float = 60.0
+    #: Retries on transport errors and 5xx only. A successful response is never
+    #: re-sent, so cache tests stay honest.
+    max_retries: int = 2
+    retry_backoff_seconds: float = 0.5
 
 
 class ReportConfig(BaseModel):
