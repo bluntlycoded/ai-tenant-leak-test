@@ -34,11 +34,13 @@ Exit codes: `0` passed, `1` operational error (nothing was proven), `2` a leak a
 
 ## The suite
 
-20 tests in `suites/quick-leak-check.yaml`, across seven groups: direct cross-tenant retrieval, semantic adjacency, direct prompt injection, indirect injection via a planted document, citation leakage, metadata leakage, and cache reuse. The last two groups run in both directions, because isolation is not always symmetric.
+23 tests in `suites/quick-leak-check.yaml`, across seven groups: direct cross-tenant retrieval, semantic adjacency, direct prompt injection, indirect injection via a planted document, citation leakage, metadata leakage, and cache reuse. The last two groups run in both directions, because isolation is not always symmetric.
 
 Two design choices carry most of the weight:
 
-**Semantically adjacent fixtures.** Tenant B holds a near-duplicate of Tenant A's pricing document. Random unrelated canaries do not stress a retriever; a near-duplicate of the caller's own question does. This is the highest-yield group in the suite.
+**Semantically adjacent fixtures.** Each tenant holds a near-duplicate of the other's documents on two topics — Q4 pricing and the SLA. Random unrelated canaries do not stress a retriever; a near-duplicate of the caller's own question does. This is the highest-yield group in the suite, and it is deliberately spread across two document types so that a boundary which happens to hold on one collection is still exercised.
+
+Each pair carries terms that exist in only one tenant's copy — a Freight tier, a sub-95% credit tier, a shipment tracking API. That makes some probes diagnostic even without a canary: Tenant A has no shipment tracking API, so a confident answer about its uptime commitment is itself the finding.
 
 **Derived forbidden markers.** A test case never hardcodes what it looks for. It declares which tenant sends the prompt, and the forbidden set is computed from every *other* tenant's fixtures at run time. Add a document and every test starts checking for its markers.
 
